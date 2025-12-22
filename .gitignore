@@ -195,3 +195,4 @@ cython_debug/
 .cursorindexingignore
 
 uv.lock
+CLAUDE.md

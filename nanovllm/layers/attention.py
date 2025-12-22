@@ -18,6 +18,19 @@ def store_kvcache_kernel(
     slot_mapping_ptr,
     D: tl.constexpr,
 ):
+    """
+    Triton内核：将K和V存储到KV-cache。
+
+    功能：
+    1. 从输入tensor中读取K和V
+    2. 根据slot_mapping将数据写入KV-cache
+    3. 支持批量并行处理
+
+    内存布局要求：
+    - K和V的stride(-1)必须为1（连续存储）
+    - K和V的stride(1)必须等于head_dim
+    - KV-cache的stride(1)必须等于D (num_heads * head_dim)
+    """
     idx = tl.program_id(0)
     slot = tl.load(slot_mapping_ptr + idx)
     if slot == -1: return
@@ -31,6 +44,22 @@ def store_kvcache_kernel(
 
 
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
+    """
+    将K和V存储到KV-cache。
+
+    使用方法：
+    store_kvcache(k, v, k_cache, v_cache, slot_mapping)
+
+    参数：
+    - key: 当前的K tensor [N, num_heads, head_dim]
+    - value: 当前的V tensor [N, num_heads, head_dim]
+    - k_cache: K-cache [num_blocks, block_size, num_heads, head_dim]
+    - v_cache: V-cache [num_blocks, block_size, num_heads, head_dim]
+    - slot_mapping: 槽位映射 [N]
+
+    功能：
+    调用Triton内核高效地将K和V写入KV-cache
+    """
     N, num_heads, head_dim = key.shape
     D = num_heads * head_dim
     assert key.stride(-1) == 1 and value.stride(-1) == 1
@@ -41,6 +70,19 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
 
 
 class Attention(nn.Module):
+    """
+    注意力层，支持KV-cache和flash-attention。
+
+    核心功能：
+    1. 标准的多头注意力计算
+    2. KV-cache存储和管理
+    3. 支持prefix caching
+    4. 自动选择prefill或decode模式
+
+    两种模式：
+    - Prefill模式：使用flash_attn_varlen_func，支持变长序列和prefix caching
+    - Decode模式：使用flash_attn_with_kvcache，利用已缓存的KV
+    """
 
     def __init__(
         self,
