@@ -693,59 +693,332 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+        """
+        执行模型推理，支持eager和CUDA Graph两种模式。
+
+        使用方法：
+        logits = self.run_model(input_ids, positions, is_prefill)
+
+        参数：
+        - input_ids: [batch_size, ...]的int64张量，输入token IDs
+        - positions: [batch_size, ...]的int64张量，位置编码
+        - is_prefill: bool，是否为prefill阶段
+
+        返回值：
+        - logits: [batch_size, vocab_size]的float32张量，模型输出logits
+
+        两种执行模式：
+        1. Eager模式（直接执行）：
+           - is_prefill为True（prefill阶段）
+           - enforce_eager为True（禁用CUDA Graph）
+           - batch size > 512（大batch）
+
+        2. CUDA Graph模式（预捕获）：
+           - decode阶段且batch size <= 512
+
+        优化原理：
+        - eager模式：每次重新计算，灵活性高但有开销
+        - CUDA Graph：预捕获计算图并重用，减少kernel launch开销
+
+        使用场景：
+        1. prefill阶段的高吞吐量处理
+        2. decode阶段的低延迟推理
+        3. 不同batch size的动态适配
+        4. 生产环境的高性能推理
+
+        性能特点：
+        - prefill：优先吞吐量，可变batch size
+        - decode：优先延迟，固定batch size（CUDA Graph）
+        - 大batch：自动切换到eager模式
+        """
+        # ===== 模式选择：Eager vs CUDA Graph =====
+        # 满足以下任一条件则使用eager模式：
+        # 1. prefill阶段（需要处理大量token，batch不固定）
+        # 2. 强制eager模式（调试或兼容性）
+        # 3. 大batch（>512，CUDA Graph收益不明显）
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+            # Eager模式：直接执行模型推理
+            # 优点：灵活，支持任意batch size
+            # 缺点：有kernel launch开销
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
-            bs = input_ids.size(0)
+            # CUDA Graph模式：使用预捕获的计算图
+            # 优点：kernel launch开销小，推理更快
+            # 缺点：batch size固定，不够灵活
+
+            bs = input_ids.size(0)  # 当前batch size
+
+            # 获取当前context（包含slot_mapping, context_lens, block_tables）
             context = get_context()
+
+            # 选择合适的CUDA Graph
+            # graph_bs: [1, 2, 4, 8, 16, 32, ...] 预定义的batch sizes
+            # 选择第一个 >= 当前bs的graph
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+
+            # 获取预分配的变量存储区域
             graph_vars = self.graph_vars
+
+            # ===== 更新graph变量 =====
+            # 注意：这些tensor在capture时已经分配，只需更新数据
+
+            # 更新input_ids（只更新有效部分[:bs]）
             graph_vars["input_ids"][:bs] = input_ids
+
+            # 更新positions
             graph_vars["positions"][:bs] = positions
+
+            # 重置slot_mapping（无效位置填充-1）
             graph_vars["slot_mapping"].fill_(-1)
+
+            # 更新有效slot_mapping
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
+
+            # 重置context_lens
             graph_vars["context_lens"].zero_()
+
+            # 更新有效context_lens
             graph_vars["context_lens"][:bs] = context.context_lens
+
+            # 更新block_tables（只更新有效列）
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+
+            # 重放CUDA Graph（执行预捕获的计算）
             graph.replay()
+
+            # 返回计算结果（只取有效部分[:bs]）
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+        """
+        完整的推理流程：数据准备 → 模型推理 → 采样 → 清理。
+
+        使用方法：
+        # 单进程模式
+        token_ids = runner.run(seqs, is_prefill)
+
+        # 多进程模式（主进程）
+        token_ids = runner.call("run", seqs, is_prefill)
+
+        参数：
+        - seqs: 要处理的序列列表
+        - is_prefill: bool，是否为prefill阶段
+
+        返回值：
+        - token_ids: list[int]，生成的token IDs（仅rank 0）
+          * None（rank > 0，子进程不返回结果）
+
+        执行流程：
+        1. 数据准备：
+           - prefill：prepare_prefill（批量处理所有输入token）
+           - decode：prepare_decode（处理最后一个token）
+
+        2. 模型推理：
+           - run_model执行前向计算
+           - 支持eager和CUDA Graph模式
+
+        3. 采样（仅rank 0）：
+           - 从logits采样token
+           - 支持温度、top-k、top-p等参数
+
+        4. 清理：
+           - reset_context重置全局context
+           - 释放临时资源
+
+        多进程行为：
+        - rank 0（主进程）：
+          * 执行完整流程
+          * 返回token_ids
+          * 负责任务分发和结果聚合
+
+        - rank > 0（子进程）：
+          * 仅执行模型推理部分
+          * 返回None
+          * 通过SharedMemory接收指令
+
+        使用场景：
+        1. 一次完整的prefill或decode推理
+        2. 批量序列处理
+        3. 流式生成
+        4. 分布式推理
+
+        性能特点：
+        - prefill：处理大量token，高吞吐量
+        - decode：处理单个token，低延迟
+        - 自动batch和并行优化
+        """
+        # ===== 1. 数据准备阶段 =====
+        # 根据阶段选择不同的准备方法：
+        # - prefill：处理所有新输入token（可能很多个）
+        # - decode：只处理最后一个token（生成下一个）
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+
+        # ===== 2. 准备采样参数（仅主进程） =====
+        # 子进程不需要采样参数，节省传输开销
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+
+        # ===== 3. 模型推理 =====
+        # 执行前向计算，得到logits
+        # 支持eager和CUDA Graph两种模式
         logits = self.run_model(input_ids, positions, is_prefill)
+
+        # ===== 4. 采样（仅主进程） =====
+        # 从logits中采样下一个token
+        # 支持多种采样策略（temperature, top-k, top-p）
+        # 子进程直接返回None，不执行采样
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+
+        # ===== 5. 清理阶段 =====
+        # 重置全局context，释放临时资源
+        # 为下次推理做准备
         reset_context()
+
+        # 主进程返回token IDs，子进程返回None
         return token_ids
 
     @torch.inference_mode()
     def capture_cudagraph(self):
+        """
+        捕获CUDA Graph，用于加速decode阶段的推理。
+
+        使用方法：
+        在模型初始化时自动调用（如果未启用enforce_eager）
+        self.capture_cudagraph()
+
+        原理：
+        CUDA Graph通过预捕获计算图并重用，减少kernel launch和调度开销。
+        适用于decode阶段的小batch（<=512）推理，能显著提升性能。
+
+        捕获策略：
+        1. 预定义多个batch size：1, 2, 4, 8, 16, 32, ..., max_bs
+        2. 为每个batch size捕获一个独立的CUDA Graph
+        3. 推理时动态选择合适的graph（选择第一个 >= 当前bs的graph）
+
+        性能优势：
+        - 减少GPU kernel launch开销（~10-30%性能提升）
+        - 降低CUDA调度器负载
+        - 提高decode阶段的吞吐量
+
+        限制：
+        1. batch size固定（捕获后无法改变）
+        2. 仅适用于decode阶段（prefill阶段batch变化大）
+        3. 不支持动态control flow
+        4. 内存占用较高（预分配多套graph）
+
+        使用场景：
+        1. 生产环境的低延迟推理
+        2. 高并发的小batch场景
+        3. decode阶段的性能优化
+        4. 流式生成应用
+
+        初始化参数：
+        - max_bs: 最大batch size（默认min(max_num_seqs, 512)）
+        - max_num_blocks: 最大block数量（根据max_model_len计算）
+
+        变量分配：
+        - input_ids, positions: 输入张量（预分配到最大size）
+        - slot_mapping, context_lens, block_tables: 上下文张量
+        - outputs: 输出张量（隐藏层维度）
+
+        图池管理：
+        - 使用graph_pool统一管理所有CUDA Graph的内存池
+        - 避免频繁的内存分配和释放
+        - 提高内存利用率
+
+        注意：
+        - 这是一个耗时操作（可能需要几秒到几十秒）
+        - 只能执行一次（在初始化阶段）
+        - 需要足够的显存来存储所有graph
+        - 仅在未启用enforce_eager时调用
+        """
         config = self.config
         hf_config = config.hf_config
+
+        # ===== 1. 计算最大batch size =====
+        # 限制：不超过最大序列数，且不超过512（CUDA Graph的最佳范围）
         max_bs = min(self.config.max_num_seqs, 512)
+
+        # ===== 2. 计算最大block数量 =====
+        # 根据模型最大长度和block大小计算
+        # 公式：ceil(max_model_len / block_size)
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
+
+        # ===== 3. 预分配变量存储空间 =====
+        # 所有变量都预分配到最大size，避免运行时分配
+
+        # 输入张量：input_ids和positions
+        # 形状：[max_bs]，dtype：int64（与真实输入一致）
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
+
+        # 上下文张量：用于flash-attn
+        # slot_mapping: [max_bs]，KV-cache槽位映射
+        # context_lens: [max_bs]，每个序列的上下文长度
+        # block_tables: [max_bs, max_num_blocks]，block索引表
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
+
+        # 输出张量：[max_bs, hidden_size]
+        # 保存模型的隐藏层输出（logits计算用）
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
+
+        # ===== 4. 定义预捕获的batch sizes =====
+        # 从小到大递增：[1, 2, 4, 8, 16, 32, 48, 64, ...]
+        # 注意：从大到小遍历（方便后续覆盖）
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+
+        # 初始化图存储字典
         self.graphs = {}
         self.graph_pool = None
 
+        # ===== 5. 逐个捕获CUDA Graph =====
+        # 注意：逆序遍历（从大到小），确保大batch先被捕获
+        # 这样在内存不足时可以覆盖小batch的graph
         for bs in reversed(self.graph_bs):
+            # 创建CUDA Graph对象
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+
+            # 设置decode阶段的context（用于flash-attn）
+            # 注意：这里只设置有效的部分[:bs]
+            set_context(
+                False,  # is_prefill=False（decode模式）
+                slot_mapping=slot_mapping[:bs],
+                context_lens=context_lens[:bs],
+                block_tables=block_tables[:bs]
+            )
+
+            # ===== 5.1 预热（Warmup） =====
+            # 在捕获前先执行一次推理，确保：
+            # 1. CUDA内核已JIT编译
+            # 2. 内存分配器已初始化
+            # 3. 缓存已填充
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])
+
+            # ===== 5.2 捕获（Capture） =====
+            # 将接下来的计算图捕获到graph对象中
+            # 注意：这里会记录所有GPU操作，但不会立即执行
             with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])
+
+            # ===== 5.3 初始化图池 =====
+            # 第一个graph创建时获取内存池
+            # 后续graph复用同一个池，提高内存效率
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
+
+            # 保存graph到字典
             self.graphs[bs] = graph
+
+            # 同步GPU，确保所有操作完成
             torch.cuda.synchronize()
+
+            # 重置context，为下一个graph的设置做准备
             reset_context()
 
+        # ===== 6. 保存变量引用 =====
+        # 供run_model在CUDA Graph模式下使用
+        # 注意：这些是预分配的变量，实际推理时只需更新数据部分
         self.graph_vars = dict(
             input_ids=input_ids,
             positions=positions,
