@@ -37,7 +37,16 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
 
 
 def summarize_request(seq):
-    raise NotImplementedError("Task 3")
+    """TODO(student): return (num_prompt_tokens, num_completion_tokens, total_steps).
+
+    total_steps = number of engine steps this seq participated in (count _trace).
+    It should equal num_completion_tokens — the prefill step itself emits the
+    first token (scheduler.py:86-88), so every participating step appends one.
+    """
+    total_steps = sum(
+        1 for r in _trace if any(b[0] == seq.seq_id for b in r["before"])
+    )
+    return (seq.num_prompt_tokens, seq.num_completion_tokens, total_steps)
 
 
 def run_checks(max_tokens):
