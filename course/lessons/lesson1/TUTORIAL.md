@@ -172,7 +172,7 @@ outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} fo
 
 注意 `Sequence.counter` 是个全局自增计数器（`sequence.py:16`，`itertools.count()`），seq_id 越早创建越小，所以 `sorted(outputs.keys())` 正好还原用户传入 prompt 的顺序。
 
-### 3.2 `add_request`：prompt → Sequence（`llm_engine.py:43-48`）
+### 3.2 `add_request`：prompt → Sequence（`llm_engine.py:43-47`）
 
 ```python
 # llm_engine.py:43-47
@@ -381,7 +381,7 @@ lab 跑完会打印整个 `_trace`（`_print_trace()`，lab.py:118-124）。Task
 - 为什么 prefill 步的 `num_scheduled_tokens` 等于整条 prompt 的长度，而每个 decode 步都是 1？（答案见 §3.5）
 - 为什么一个 request 参与的总步数 == 它的 `num_completion_tokens`？（答案见 §3.6 的不变式）
 
-这两点 `run_checks`（lab.py:83-87）会自动验证，你只需对照 trace 把因果讲清楚。
+这两点 `run_checks`（lab.py:83-87）会自动验证，你只需对照 trace 把因果讲清楚。请把你的解释直接写在 `lab.py` 里 `=== Task 2 (observe + explain) ===` 那块注释里（位置在 `traced_add` 之后、`traced_postprocess` 之前）。
 
 ### Task 3：填 `summarize_request`（lab.py:35-41）
 

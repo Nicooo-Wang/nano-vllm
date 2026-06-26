@@ -130,7 +130,7 @@ if is_prefill and seq.num_cached_tokens < seq.num_tokens:
 seq.append_token(token_id)
 ```
 
-`continue` 只在"chunked prefill 还没处理完整个 prompt"时触发（`num_cached_tokens < num_tokens`）。lesson 1 关闭了 chunked prefill（见 `scheduler.schedule` 的 prefill 分支与 example.py 的配置），单步 prefill 就把整个 prompt 处理完，于是 `num_cached_tokens == num_tokens`，`continue` 不触发——直接走到 `seq.append_token(token_id)`，**prefill 步也产 1 个 token**。
+`continue` 只在"chunked prefill 还没处理完整个 prompt"时触发（`num_cached_tokens < num_tokens`）。lesson 1 的 smoke prompt 很短，整条 prompt 的长度远小于 `max_num_batched_tokens`（16384），一次 prefill 就能算完整条 prompt，于是 `num_cached_tokens == num_tokens`；同时 `scheduler.schedule` 的 prefill 分支里只有"第一条 seq"才允许 chunked（`scheduler.py:42` 的 `if remaining < num_tokens and scheduled_seqs: break`），这里 `remaining` 充足、该 break 不触发，所以根本不会走到 chunked-prefill-only-for-the-first-seq 那条分支。`continue` 不触发——直接走到 `seq.append_token(token_id)`，**prefill 步也产 1 个 token**。
 
 由此：seq 参与的**每一步**（含 prefill 步）都 `append_token` 一次，所以
 

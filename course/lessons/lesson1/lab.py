@@ -1,8 +1,11 @@
-"""Lesson 1 lab (reference solution) — trace the journey of a request.
+"""Lesson 1 lab — trace the journey of a request through nano-vllm.
 
-The student file `../lab.py` is this file with the two TODOs blanked.
-Importing this module does NOT import nanovllm/torch (those live in main()),
-so the synthetic tests in test_checks.py run without a GPU.
+Fill in the two TODO functions:
+  - Task 1: traced_postprocess  (record each engine step into _trace)
+  - Task 3: summarize_request   (return prompt/completion/step counts)
+Task 2 is observe + explain — write it in the marked comment block below.
+Then run:  uv run python course/lessons/lesson1/lab.py
+If your recording is correct you will see "All checks passed ✓".
 """
 import os
 
@@ -16,6 +19,19 @@ def traced_add(self, seq):
     """Hook for Scheduler.add: remember every Sequence by id (provided)."""
     _seqs[seq.seq_id] = seq
     return _orig_add(self, seq)
+
+
+# === Task 2 (observe + explain) — no code to write ===
+# After running, read the `--- trace ---` table this lab prints.
+# Observe: the prefill step's num_scheduled_tokens equals the whole prompt length,
+#   while every decode step's num_scheduled_tokens is 1.
+# Explain (write your answer below, as comments): how does the single expression
+#   `num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)`
+#   (llm_engine.py:51) use one sign to encode BOTH "this is decode" AND "the token count
+#   this step"? And how does that drive the Prefill/Decode throughput curves
+#   (llm_engine.py:76-79)?
+# Your answer:
+#   (write here)
 
 
 def traced_postprocess(self, seqs, token_ids, is_prefill):
