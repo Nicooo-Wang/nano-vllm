@@ -6,47 +6,66 @@
 
 ## §0 环境初始化
 
-本课要真实跑一遍 nano-vllm（不靠 mock），先把环境备齐。
+本课要真实跑一遍 nano-vllm（不靠 mock），先把环境备齐。这一节给的是在本机**实测可用**的一套工序——不是 `uv sync` 一把梭。
 
-### 0.1 装依赖
+> **为什么不直接 `uv sync`？** 两类坑都在这里：
+> 1. **flash-attn 编译失败**：`uv sync` 走 build isolation，在一个**没有 torch**的干净隔离环境里编译 flash-attn；但 flash-attn 的 `setup.py` 编译时就要 `import torch`，于是失败。解法是先装好 torch，再 `flash-attn --no-build-isolation` 让它复用当前环境的 torch。
+> 2. **torch 太新，驱动不认**：`uv sync` 会解析到最新的 torch（往往是 CUDA 13 的 wheel），可能超出你 NVIDIA 驱动支持的版本，结果 `torch.cuda.is_available()` 返回 `False`。解法是按驱动的 `CUDA Version` 从 PyTorch 的对应 CUDA wheel index（如 `cu128`）装一个匹配的 torch。
 
-仓库根目录的 `pyproject.toml` 已经声明了全部依赖（torch≥2.4 / triton≥3.0 / transformers≥4.51 / flash-attn / xxhash），在仓库根目录跑一句即可：
+### 0.1 先备齐前置
+
+开始前确认这三样都在：
 
 ```bash
-uv sync
+nvidia-smi        # 有一张 CUDA GPU；同时记下输出里的 CUDA Version: xx.x（决定下面选哪个 cu 索引）
+nvcc --version    # flash-attn 要从源码编译，必须有 nvcc
 ```
 
-`uv` 会按 `pyproject.toml` 建好虚拟环境并把上面的包全部装上。如果你没用过 `uv`：它是一个 Rust 写的 Python 包/环境管理器（类似 `pip`+`venv` 的快替代），`uv sync` 等价于「读 `pyproject.toml` → 建 `.venv/` → 装依赖」一条龙。
+`nvcc` 缺失就先装 CUDA toolkit（flash-attn 必须从源码编 kernel，没有 nvcc 走不通）。
 
-### 0.2 下模型
+### 0.2 装依赖（按顺序，别让 torch 被改写）
+
+```bash
+# 1. 建环境
+uv venv
+source .venv/bin/activate
+
+# 2. 装「驱动兼容」的 torch：按 nvidia-smi 的 CUDA Version 选 index（cu128 / cu124 / cu121 ...）
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+python -c "import torch; print('cuda avail:', torch.cuda.is_available())"   # 必须是 True
+
+# 3. flash-attn：复用已装好的 torch 编译（需要 nvcc，约 10–20 分钟）
+uv pip install ninja packaging
+uv pip install flash-attn --no-build-isolation
+
+# 4. 其余依赖——关键是别让 torch 被重新解析成更新的版本
+uv pip install transformers xxhash
+uv pip install -e . --no-deps
+```
+
+要点回顾：第 2 步用 PyTorch 的 CUDA index 锁住一个驱动能跑的 torch；第 3 步 `--no-build-isolation` 让 flash-attn 拿当前环境的 torch 去编 kernel；第 4 步全程 `--no-deps` 装本仓库，防止 uv 把 torch 重新解析回最新（太新）的版本。三者缺一，多半就是「编不过」或「cuda 不可用」。
+
+### 0.3 下模型
 
 nano-vllm 默认用 Qwen3-0.6B 当 smoke 模型（小、快、能跑动）。提前下到本地：
 
 ```bash
-huggingface-cli download Qwen/Qwen3-0.6B --local-dir ~/huggingface/Qwen3-0.6B/
+huggingface-cli download Qwen/Qwen3-0.6B --local-dir ~/huggingface/Qwen3-0.6B
 ```
 
-`huggingface-cli` 是 `huggingface_hub` 包带的 CLI，`uv sync` 装 transformers 时会一并装上。如果网络受限，配 `HF_ENDPOINT=https://hf-mirror.com` 走镜像。
+如果网络受限，配 `HF_ENDPOINT=https://hf-mirror.com` 走镜像。
 
-### 0.3 Smoke：跑通 `example.py`
+### 0.4 Smoke：跑通 `example.py`
 
-仓库根目录的 `example.py` 是最小入口——构造 2 条 prompt，喂给 `llm.generate`，打印补全。这是判断你环境是否就绪的最快方式：
+仓库根目录的 `example.py` 是最小入口——构造 2 条 prompt，喂给 `llm.generate`，打印补全。这是判断环境是否就绪的最快方式：
 
 ```bash
-uv run python example.py
+python example.py
 ```
 
-看到两条 `Completion: '...'` 输出、且没有 traceback，环境就 OK 了。`uv run` 会自动用刚才 `uv sync` 建的 `.venv/` 去跑脚本，不用手动 `source activate`。
+看到两条 `Completion: '...'` 输出、且没有 traceback，环境就 OK 了。
 
-### 0.4 flash-attn 装不上的备选
-
-`flash-attn` 是个带 CUDA kernel 的包，`uv sync`（走预编译 wheel）一般能成；但如果你机器的 CUDA / torch 版本和 wheel 对不上，会落到源码编译，容易失败。备选：
-
-```bash
-pip install flash-attn --no-build-isolation
-```
-
-`--no-build-isolation` 让它直接用当前环境里**已装好的 torch** 去编译（而不是隔离出一个干净环境再装 torch——那会导致版本对不上）。注意：**你的 CUDA toolkit、驱动、torch 必须三者版本匹配**，否则编译失败或运行时非法内存。如果实在装不上，本课的 lab 也能跑——只要 `import flash_attn` 不报错即可（lab 的环境检查 `_check_env` 只验证 import）。
+> **运行配置提醒**：本课跑通只需默认的最小配置——`enforce_eager=True`、`tensor_parallel_size=1`。
 
 ---
 
