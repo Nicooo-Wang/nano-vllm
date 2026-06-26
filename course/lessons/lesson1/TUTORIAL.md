@@ -99,12 +99,16 @@ python example.py
            scheduler.add(seq) ──► waiting 队列 ◄─┘
                 │
                 ▼
-   ┌──── while not is_finished(): ────────────────────────────┐
+       ┌──── while not is_finished(): ────────────────────────────┐
    │                                                          │
    │   step()                                                 │
    │     │                                                    │
    │     ├── 1. schedule()  ──► (seqs, is_prefill)            │
    │     │      决定这一 tick 算谁、算多少                     │
+   │     │                                                    │
+   │     │      ▼ step 0 PREFILL：两条 prompt 一起排进 batch   │
+   │     │        seqs = [seq_a, seq_b]  (scheduler.py:30 while)│
+   │     │      ▼ 之后每个 tick DECODE：两条 seq 并行各产 1     │
    │     │                                                    │
    │     │     num_tokens = Σnum_scheduled_tokens (prefill)   │
    │     │                 或 -len(seqs) (decode)             │
@@ -125,6 +129,8 @@ python example.py
                 ▼
        tokenizer.decode(token_ids)  ──►  [{"text": ..., "token_ids": ...}, ...]
 ```
+
+> **批 prefill（continuous batching 的雏形）**：本课 smoke 提交两条 prompt，它们会在**同一个 step 0 的 PREFILL**里一起算，之后也在同一个 DECODE tick 里并行各产 1 个 token——这正是你跑 lab 时看到 `step 0 PREFILL seqs=[...]` 里 `seqs` 含两条的原因。`schedule()` 的 prefill 分支是一个 `while` 循环（`scheduler.py:30`），只要 batch 预算（`max_num_batched_tokens`）和序列数上限（`max_num_seqs`）还够，就把 `waiting` 队列里的多条 prompt 一起拉进同一个 prefill step。这就是 continuous batching 的雏形：请求不必一个个排队算 prefill，而是能合并就合并。
 
 ### 2.2 Sequence 状态机
 
@@ -189,7 +195,9 @@ outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
 outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
 ```
 
-注意 `Sequence.counter` 是个全局自增计数器（`sequence.py:16`，`itertools.count()`），seq_id 越早创建越小，所以 `sorted(outputs.keys())` 正好还原用户传入 prompt 的顺序。
+`seq_id` 来自一个**模块级全局自增计数器** `Sequence.counter = itertools.count()`（`sequence.py:16`），在进程生命周期内**从不重置**。因为创建越早的 seq 拿到的 id 越小，`sorted(outputs.keys())` 就能把结果按"提交顺序"还原出来。
+
+> **注意**：seq_id 的**具体值不必从 0 开始**——它取决于这个进程在本次运行之前已经创建过多少个 Sequence。比如本课 lab 跑起来时，引擎/worker 初始化阶段可能就已经消耗掉若干个 id，所以你看到的可能是 `seq 4`、`seq 5` 而不是 `0`、`1`。这是正常的（全局自增计数器，`sequence.py:16`），别因此怀疑自己的实现——只要 id 是**单调递增**的、`sorted` 能还原提交顺序即可。
 
 ### 3.2 `add_request`：prompt → Sequence（`llm_engine.py:43-47`）
 
@@ -344,6 +352,8 @@ if is_prefill and seq.num_cached_tokens < seq.num_tokens:
 > prefill 步 append 第 1 个；之后每个 decode 步各 append 一个。
 > 所以：`total_steps == num_completion_tokens`。
 
+**桥接到多条 seq 共享一个 prefill step 的情况**：这条不变式是**按序列各自计**的。即使两条 seq 共享了 step 0 的 PREFILL（`scheduler.py:30` 的 `while` 把它们拉进同一 batch），每条 seq 参与的步数 = **它在 trace 的 `before` 里出现的次数**——那个共享的 prefill step 对每条 seq 都各算一次参与，每个 decode step 同理。所以每条 seq 的"参与步数"仍然等于它自己的 `num_completion_tokens`：它加入的每一步，`append_token` 都为它执行一次（prefill 步吐第 1 个，decode 步各吐 1 个）。不变式在 batched 情形下不变，变的只是"多条 seq 在同一 tick 里一起算"。
+
 对照看：
 - prefill 步：`num_scheduled_tokens = 整条 prompt 长度`，但 `append_token` 只跑一次 → 贡献 1 个 completion token。
 - 每个 decode 步：`num_scheduled_tokens = 1`，`append_token` 跑一次 → 贡献 1 个 completion token。
@@ -367,6 +377,8 @@ class SequenceStatus(Enum):
     RUNNING = auto()
     FINISHED = auto()
 ```
+
+> **顺带认识 `seq.is_finished`**（`sequence.py:39-41`）：它是 `Sequence` 上的一个 property，就一行——`return self.status == SequenceStatus.FINISHED`。lab 的 Task 1 要你在 trace 的 `after` 里记下它（每个 seq 出 `postprocess` 后是否已结束）；`step()` 的第 5 段（§3.3）也正是用它把本次 tick 里刚结束的 seq 挑出来返回。
 
 ---
 
@@ -396,11 +408,15 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
 
 ### Task 2：读 trace、写解释（无代码）
 
-lab 跑完会打印整个 `_trace`（`_print_trace()`，lab.py:118-124）。Task 2 要求你看着 trace 回答两件事：
-- 为什么 prefill 步的 `num_scheduled_tokens` 等于整条 prompt 的长度，而每个 decode 步都是 1？（答案见 §3.5）
-- 为什么一个 request 参与的总步数 == 它的 `num_completion_tokens`？（答案见 §3.6 的不变式）
+lab 跑完会打印整个 `_trace`（`_print_trace()`，lab.py:118-124）。Task 2 要求你看着 trace 做**观察 + 解释**两件事：
 
-这两点 `run_checks`（lab.py:83-87）会自动验证，你只需对照 trace 把因果讲清楚。请把你的解释直接写在 `lab.py` 里 `=== Task 2 (observe + explain) ===` 那块注释里（位置在 `traced_add` 之后、`traced_postprocess` 之前）。
+- **观察（Observe，已由 `run_checks` 自动验证，不必再答）**：你的 trace 里两条 prompt 是在**同一个 step 0 PREFILL** 里一起算的；prefill 步每条 seq 的 `num_scheduled_tokens` 等于它各自的 prompt 长度；之后每个 DECODE 步每条 seq 的 `num_scheduled_tokens` 都是 1。`run_checks` 里的 `Task2 prefill nst==num_prompt_tokens`、`Task2 decode nst all==1` 这两条就是机器帮你核对的。
+
+- **解释（Explain，自检——对照 `ANSWERS.md §2`，`run_checks` 不判这一项）**：用你自己的话讲清楚——为什么每条 request 的**参与步数 `total_steps` 正好等于它的 `num_completion_tokens`**？提示见 §3.6 的不变式：关键在于 **prefill 步本身也会吐出第 1 个 completion token**（`scheduler.py:86-88` 的 `continue` 在"整条 prompt 一次算完"时不触发，于是 `append_token` 照跑），所以它参与的每一步都恰好 append 一个 token。
+
+> **为什么 Explain 不是自动判分**：`run_checks` 能验证"trace 里的数值确实满足不变式"，但**讲清楚因果**是你自己内化的过程——`run_checks` 判不了你的措辞。所以 Explain 这一项要你**自己对照 `ANSWERS.md §2` 的参考解释核对**：哪怕 `All checks passed ✓` 出来了，Explain 留空也意味着你跳过了这节课的核心收获。别因为"check 全过了"就空着。
+
+请把你的解释直接写在 `lab.py` 里 `=== Task 2 (observe + explain) ===` 那块注释里（位置在 `traced_add` 之后、`traced_postprocess` 之前）。
 
 ### Task 3：填 `summarize_request`（lab.py:35-41）
 
@@ -457,21 +473,23 @@ All checks passed ✓
                                              └───────────┘
 ```
 
-### 5.2 step 时序：一条 request 的一生（max_tokens=4 为例）
+### 5.2 step 时序：两条 request 并行的一生（max_tokens=4，两条 prompt 同步结束为例）
+
+nano-vllm 把**两条 prompt 的 prefill 合并在同一个 step 0**（`scheduler.py:30` 的 `while` 循环），之后两条 seq 也在同一个 DECODE tick 里并行各产 1 个 token。下表以两条 seq（A、B，prompt 长度各为 Na、Nb，同步在 max_tokens=4 结束）为例：
 
 ```
-tick   is_prefill   动作                                  append?
-----   ----------   ------------------------------------  -------
- 0     PREFILL      schedule: seq 排整条 prompt (nst=N)   ✓  (num_cached==num_tokens, continue 不触发)
-                    run: 一次算完整条 prompt + 采样        → append 第 1 个 completion token
-                    postprocess: 转 RUNNING
- 1     DECODE       schedule: nst=1                        ✓
-                    run: 用 last_token + KV cache 采样      → append 第 2 个
- 2     DECODE       schedule: nst=1                        ✓  → append 第 3 个
- 3     DECODE       schedule: nst=1                        ✓  → append 第 4 个 == max_tokens → FINISHED
+tick   is_prefill   动作                                                  append?
+----   ----------   ----------------------------------------------------- -------
+ 0     PREFILL      schedule: seqs=[A,B] 一起排进 batch (nst=Na, Nb)        ✓✓  (num_cached==num_tokens，两条 continue 都不触发)
+                    run: 一次算完两条 prompt + 各采样 1 个 token            → 各 append 第 1 个 completion token
+                    postprocess: 两条都转 RUNNING
+ 1     DECODE       schedule: nst=1 (A,B)                                   ✓✓
+                    run: 各用 last_token + KV cache 采样                    → 各 append 第 2 个
+ 2     DECODE       schedule: nst=1 (A,B)                                   ✓✓  → 各 append 第 3 个
+ 3     DECODE       schedule: nst=1 (A,B)                                   ✓✓  → 各 append 第 4 个 == max_tokens → 两条 FINISHED
 ```
 
-总步数 = 4 == num_completion_tokens。注意 tick 0（prefill）就已经 append 了——这是 §3.6 的关键点。
+每条 seq 的总步数 = 4 == 各自的 `num_completion_tokens`。注意 tick 0（prefill）就已经为每条 seq append 了——这是 §3.6 的关键点。两条 seq 共享所有 4 个 tick，但不变式是**按 seq 各自计**的（见 §3.6 的桥接说明）。
 
 ### 5.3 prefill vs decode：`num_scheduled_tokens` 对比
 

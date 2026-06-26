@@ -23,13 +23,27 @@ def traced_add(self, seq):
 
 # === Task 2 (observe + explain) — no code to write ===
 # After running, read the `--- trace ---` table this lab prints.
-# Observe: the prefill step's num_scheduled_tokens equals the whole prompt length,
-#   while every decode step's num_scheduled_tokens is 1.
-# Explain (write your answer below, as comments): how does the single expression
-#   `num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)`
-#   (llm_engine.py:51) use one sign to encode BOTH "this is decode" AND "the token count
-#   this step"? And how does that drive the Prefill/Decode throughput curves
-#   (llm_engine.py:76-79)?
+#
+# Observe (already auto-verified by run_checks — no need to re-answer):
+#   * Your trace shows BOTH prompts prefilled together in the same step 0
+#     (seqs=[...] holds two ids).
+#   * In that prefill step, each seq's num_scheduled_tokens == its own prompt
+#     length; in every DECODE step each seq's num_scheduled_tokens == 1.
+#   (run_checks keys: "Task2 prefill nst==num_prompt_tokens",
+#    "Task2 decode nst all==1".)
+#
+# Explain (self-check against ANSWERS.md §2 — NOT auto-graded):
+#   In your OWN words, why does each request's
+#   `total_steps == num_completion_tokens`?
+#   Hint: the prefill step ITSELF emits the first completion token — see
+#   scheduler.py:86-88 (the `continue` only fires for chunked prefill; when
+#   the whole prompt fits in one prefill, `append_token` runs), so every
+#   step a seq participates in appends exactly one token to it.
+#
+# IMPORTANT: Explain is NOT checked by run_checks. "All checks passed ✓"
+#   can come out even with Explain left blank — but leaving it blank means
+#   skipping the core takeaway of this lesson. Write your answer below.
+#
 # Your answer:
 #   (write here)
 
@@ -92,7 +106,7 @@ def run_checks(max_tokens):
                     all(p["n_prefill_steps"] == 1 for p in per_seq)))
     results.append(("Task1 reached FINISHED",
                     all(p["finished"] for p in per_seq)))
-    results.append(("Task1 total_steps==num_completion_tokens",
+    results.append(("Task1 trace recorded all steps (count==num_completion_tokens)",
                     all(p["n_steps"] == p["seq"].num_completion_tokens for p in per_seq)))
     # Task 2: num_scheduled_tokens (prefill nst==num_prompt_tokens,
     # decode nst all==1).
@@ -107,7 +121,7 @@ def run_checks(max_tokens):
                     all(p["completion"] == len(p["seq"].completion_token_ids) for p in per_seq)))
     results.append(("Task3 completion<=max_tokens",
                     all(p["completion"] <= max_tokens for p in per_seq)))
-    results.append(("Task3 total_steps==num_completion_tokens",
+    results.append(("Task3 summarize_request total_steps==num_completion_tokens",
                     all(p["total_steps"] == p["seq"].num_completion_tokens for p in per_seq)))
     return results
 

@@ -18,6 +18,26 @@ def traced_add(self, seq):
     return _orig_add(self, seq)
 
 
+# === Task 2 (observe + explain) — reference answer ===
+# Observe (auto-verified by run_checks): both prompts are prefilled together in
+#   step 0; each seq's prefill num_scheduled_tokens == its prompt length; each
+#   DECODE step's num_scheduled_tokens == 1.
+#
+# Explain (reference — see ANSWERS.md §2): why does each request's
+#   `total_steps == num_completion_tokens`?
+# Reference answer:
+#   Because every engine step a seq participates in appends EXACTLY one token
+#   to it. The prefill step is no exception: scheduler.py:86-88's `continue`
+#   only fires for chunked prefill (num_cached_tokens < num_tokens). The smoke
+#   prompts are short enough to fit max_num_batched_tokens in one prefill, so
+#   num_cached_tokens == num_tokens, the `continue` does NOT fire, and
+#   `seq.append_token(token_id)` runs — the prefill step itself emits the 1st
+#   completion token. Every subsequent DECODE step also appends one. So the
+#   count of steps the seq participated in equals the number of tokens appended
+#   to it, i.e. num_completion_tokens. (Per-seq even when several seqs share a
+#   prefill step — count that seq's appearances in `before`.)
+
+
 def traced_postprocess(self, seqs, token_ids, is_prefill):
     """TODO(student): record this step into _trace, then call the original.
 
@@ -84,7 +104,7 @@ def run_checks(max_tokens):
                     all(p["n_prefill_steps"] == 1 for p in per_seq)))
     results.append(("Task1 reached FINISHED",
                     all(p["finished"] for p in per_seq)))
-    results.append(("Task1 total_steps==num_completion_tokens",
+    results.append(("Task1 trace recorded all steps (count==num_completion_tokens)",
                     all(p["n_steps"] == p["seq"].num_completion_tokens for p in per_seq)))
     # Task 2: num_scheduled_tokens (prefill nst==num_prompt_tokens,
     # decode nst all==1).
@@ -99,7 +119,7 @@ def run_checks(max_tokens):
                     all(p["completion"] == len(p["seq"].completion_token_ids) for p in per_seq)))
     results.append(("Task3 completion<=max_tokens",
                     all(p["completion"] <= max_tokens for p in per_seq)))
-    results.append(("Task3 total_steps==num_completion_tokens",
+    results.append(("Task3 summarize_request total_steps==num_completion_tokens",
                     all(p["total_steps"] == p["seq"].num_completion_tokens for p in per_seq)))
     return results
 

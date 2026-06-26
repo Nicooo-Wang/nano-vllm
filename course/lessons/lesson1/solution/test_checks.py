@@ -109,8 +109,8 @@ def test_run_checks_catches_wrong_completion_count():
     _build_valid_scenario()
     lab._seqs[0].num_completion_tokens = 999  # claim far more tokens than steps taken
     results = dict(lab.run_checks(max_tokens=5))
-    assert results["Task1 total_steps==num_completion_tokens"] is False
-    assert results["Task3 total_steps==num_completion_tokens"] is False
+    assert results["Task1 trace recorded all steps (count==num_completion_tokens)"] is False
+    assert results["Task3 summarize_request total_steps==num_completion_tokens"] is False
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
