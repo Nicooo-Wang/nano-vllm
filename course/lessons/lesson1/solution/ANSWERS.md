@@ -152,7 +152,7 @@ total_steps  ==  num_completion_tokens  ==  len(completion_token_ids)
 | `def traced_postprocess(...)`（Task 1，约 `lab.py:21`） | TODO(student) — Task 1 (trace)：记录本步到 `_trace`，再调用原始 `postprocess` | `lab_solved.py:21-36` 整个函数体（见上 §1.1） |
 | `def summarize_request(seq)`（Task 3，约 `lab.py:35`） | TODO(student) — Task 3 (small wrapper)：返回 `(num_prompt_tokens, num_completion_tokens, total_steps)` | `lab_solved.py:39-49` 整个函数体（见上 §3.1） |
 
-Task 2（observe/explain）**不写代码**，只是在 example.py 跑完后观察进度条 / `_trace`，回答"`num_tokens` 正负号双重语义"——见本文 §2。因此 `lab.py` 只有两个代码 TODO，与 `lab_solved.py` 的两个函数体精确对应。
+Task 2（observe/explain）**不写代码**：观察 `_trace` 里两条 prompt 被合进同一个 prefill step、prefill 的 `num_scheduled_tokens` == prompt 长度而 decode == 1，并用自己的话解释**为什么每条 request 的 `total_steps == num_completion_tokens`**——见本文 §2（该 explain 为自检、不自动判分）。因此 `lab.py` 只有两个代码 TODO，与 `lab_solved.py` 的两个函数体精确对应。
 
 ---
 
