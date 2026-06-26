@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# superpowers SDD scratch (ledgers, briefs, review packages)
+.superpowers/
+
 # C extensions
 *.so
 
