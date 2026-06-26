@@ -92,6 +92,19 @@ def test_summarize_request_counts_steps():
     assert lab.summarize_request(s1) == (12, 5, 5)
 
 
+def test_run_checks_all_pass_on_valid_scenario():
+    _build_valid_scenario()
+    failed = [name for name, ok in lab.run_checks(max_tokens=5) if not ok]
+    assert not failed, f"unexpected failures: {failed}"
+
+
+def test_run_checks_catches_corrupt_prefill_nst():
+    _build_valid_scenario()
+    lab._trace[0]["before"][0] = (0, 999, "RUNNING")  # seq0 的 prefill nst 错了
+    results = dict(lab.run_checks(max_tokens=5))
+    assert results["Task2 prefill nst==num_prompt_tokens"] is False
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":
