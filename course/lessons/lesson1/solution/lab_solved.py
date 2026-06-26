@@ -1,48 +1,48 @@
-"""Lesson 1 lab (reference solution) — trace the journey of a request.
+"""第 1 课 lab（参考答案）—— 追踪一个 request 的旅程。
 
-The student file `../lab.py` is this file with the two TODOs blanked.
-Importing this module does NOT import nanovllm/torch (those live in main()),
-so the synthetic tests in test_checks.py run without a GPU.
+学生文件 `../lab.py` 就是本文件挖空两个 TODO 后的版本。
+导入本模块不会 import nanovllm/torch（它们只在 main() 里用到），
+因此 test_checks.py 里的合成测试无需 GPU 即可运行。
 """
 import os
 
-_trace = []            # one record per engine step
+_trace = []            # 每个 engine step 一条记录
 _seqs = {}             # seq_id -> Sequence
 _orig_postprocess = None
 _orig_add = None
 
 
 def traced_add(self, seq):
-    """Hook for Scheduler.add: remember every Sequence by id (provided)."""
+    """Scheduler.add 的钩子：按 id 记下每个 Sequence（已实现）。"""
     _seqs[seq.seq_id] = seq
     return _orig_add(self, seq)
 
 
-# === Task 2 (observe + explain) — reference answer ===
-# Observe (auto-verified by run_checks): both prompts are prefilled together in
-#   step 0; each seq's prefill num_scheduled_tokens == its prompt length; each
-#   DECODE step's num_scheduled_tokens == 1.
+# === Task 2 (observe + explain) — 参考答案 ===
+# Observe（已由 run_checks 自动验证）：两条 prompt 在同一个 step 0 里一起
+#   prefill；每条 seq 的 prefill num_scheduled_tokens == 它的 prompt 长度；
+#   每个 DECODE step 的 num_scheduled_tokens == 1。
 #
-# Explain (reference — see ANSWERS.md §2): why does each request's
-#   `total_steps == num_completion_tokens`?
-# Reference answer:
-#   Because every engine step a seq participates in appends EXACTLY one token
-#   to it. The prefill step is no exception: scheduler.py:86-88's `continue`
-#   only fires for chunked prefill (num_cached_tokens < num_tokens). The smoke
-#   prompts are short enough to fit max_num_batched_tokens in one prefill, so
-#   num_cached_tokens == num_tokens, the `continue` does NOT fire, and
-#   `seq.append_token(token_id)` runs — the prefill step itself emits the 1st
-#   completion token. Every subsequent DECODE step also appends one. So the
-#   count of steps the seq participated in equals the number of tokens appended
-#   to it, i.e. num_completion_tokens. (Per-seq even when several seqs share a
-#   prefill step — count that seq's appearances in `before`.)
+# Explain（参考答案 —— 见 ANSWERS.md §2）：为什么每条 request 的
+#   `total_steps == num_completion_tokens`？
+# 参考答案：
+#   因为一个 seq 参与的每个 engine step 都恰好为它 append 一个 token。
+#   prefill 步也不例外：scheduler.py:86-88 的 `continue` 只在 chunked
+#   prefill（num_cached_tokens < num_tokens）时触发。本课的 smoke prompt
+#   足够短，一次 prefill 就能塞进 max_num_batched_tokens，所以
+#   num_cached_tokens == num_tokens，`continue` 不触发，于是
+#   `seq.append_token(token_id)` 照跑 —— prefill 步本身就吐出第 1 个
+#   completion token。之后的每个 DECODE step 同样各 append 一个。所以
+#   该 seq 参与的步数就等于 append 到它身上的 token 数，即
+#   num_completion_tokens。（即便多条 seq 共享一个 prefill step，也是
+#   按各自计的 —— 数该 seq 在 `before` 里出现的次数。）
 
 
 def traced_postprocess(self, seqs, token_ids, is_prefill):
-    """TODO(student): record this step into _trace, then call the original.
+    """TODO(student)：把本步记进 _trace，再调用原始实现。
 
-    Each seq still carries its num_scheduled_tokens at entry (postprocess
-    resets it to 0 internally at scheduler.py:85), so capture it in `before`.
+    每个 seq 进入时仍带着它的 num_scheduled_tokens（原始 postprocess
+    会在 scheduler.py:85 把它清零），所以要在 `before` 里抓取。
     """
     before = [(s.seq_id, s.num_scheduled_tokens, s.status.name) for s in seqs]
     result = _orig_postprocess(self, seqs, token_ids, is_prefill)
@@ -57,11 +57,11 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
 
 
 def summarize_request(seq):
-    """TODO(student): return (num_prompt_tokens, num_completion_tokens, total_steps).
+    """TODO(student)：返回 (num_prompt_tokens, num_completion_tokens, total_steps)。
 
-    total_steps = number of engine steps this seq participated in (count _trace).
-    It should equal num_completion_tokens — the prefill step itself emits the
-    first token (scheduler.py:86-88), so every participating step appends one.
+    total_steps = 这个 seq 参与过的 engine step 数（在 _trace 里数）。
+    它应当等于 num_completion_tokens —— prefill 步本身就会吐出第 1 个
+    token（scheduler.py:86-88），所以参与的每一步都 append 一个。
     """
     total_steps = sum(
         1 for r in _trace if any(b[0] == seq.seq_id for b in r["before"])
@@ -70,13 +70,13 @@ def summarize_request(seq):
 
 
 def run_checks(max_tokens):
-    """Verify _trace against the request-lifecycle invariants.
+    """把 _trace 对照 request 生命周期的若干不变式进行校验。
 
-    Each invariant is evaluated across all sequences and reported once as a
-    conjunction (any sequence failing the invariant makes the check fail).
-    This keeps the result keys stable for dict-based lookups in tests.
+    每条不变式都横跨所有 sequence 一起评估，只报告一次（作为合取——
+    任一 sequence 不满足即判该 check 失败）。这样结果 key 保持稳定，
+    便于在测试里按名字查找。
     """
-    # Gather per-sequence intermediate values.
+    # 收集每条 seq 的中间量。
     per_seq = []
     for seq_id, seq in _seqs.items():
         steps = [r for r in _trace if any(b[0] == seq_id for b in r["before"])]
@@ -98,23 +98,23 @@ def run_checks(max_tokens):
         })
 
     results = []
-    # Task 1: state-machine trajectory (one prefill step, reached FINISHED,
-    # total_steps==num_completion_tokens).
+    # Task 1：状态机轨迹（恰好一个 prefill step、到达 FINISHED、
+    # total_steps==num_completion_tokens）。
     results.append(("Task1 one prefill step",
                     all(p["n_prefill_steps"] == 1 for p in per_seq)))
     results.append(("Task1 reached FINISHED",
                     all(p["finished"] for p in per_seq)))
     results.append(("Task1 trace recorded all steps (count==num_completion_tokens)",
                     all(p["n_steps"] == p["seq"].num_completion_tokens for p in per_seq)))
-    # Task 2: num_scheduled_tokens (prefill nst==num_prompt_tokens,
-    # decode nst all==1).
+    # Task 2：num_scheduled_tokens（prefill 的 nst==num_prompt_tokens、
+    # decode 的 nst 全为 1）。
     results.append(("Task2 prefill nst==num_prompt_tokens",
                     all(p["prefill_nst"] == [p["seq"].num_prompt_tokens] for p in per_seq)))
     results.append(("Task2 decode nst all==1",
                     all(len(p["decode_nst"]) > 0 and all(n == 1 for n in p["decode_nst"])
                         for p in per_seq)))
-    # Task 3: summarize_request (completion==len(completion_token_ids),
-    # completion<=max_tokens, total_steps==num_completion_tokens).
+    # Task 3：summarize_request（completion==len(completion_token_ids)、
+    # completion<=max_tokens、total_steps==num_completion_tokens）。
     results.append(("Task3 completion==len(completion_token_ids)",
                     all(p["completion"] == len(p["seq"].completion_token_ids) for p in per_seq)))
     results.append(("Task3 completion<=max_tokens",

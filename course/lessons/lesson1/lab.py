@@ -1,59 +1,58 @@
-"""Lesson 1 lab — trace the journey of a request through nano-vllm.
+"""第 1 课 lab —— 追踪一个 request 穿过 nano-vllm 的完整旅程。
 
-Fill in the two TODO functions:
-  - Task 1: traced_postprocess  (record each engine step into _trace)
-  - Task 3: summarize_request   (return prompt/completion/step counts)
-Task 2 is observe + explain — write it in the marked comment block below.
-Then run:  uv run python course/lessons/lesson1/lab.py
-If your recording is correct you will see "All checks passed ✓".
+填好下面两个 TODO 函数：
+  - Task 1: traced_postprocess  （把每个 engine step 记进 _trace）
+  - Task 3: summarize_request   （返回 prompt / completion / 步数计数）
+Task 2 是观察 + 解释（不写代码）—— 在下面标记好的注释块里作答。
+然后运行：uv run python course/lessons/lesson1/lab.py
+若记录正确，你会看到 "All checks passed ✓"。
 """
 import os
 
-_trace = []            # one record per engine step
+_trace = []            # 每个 engine step 一条记录
 _seqs = {}             # seq_id -> Sequence
 _orig_postprocess = None
 _orig_add = None
 
 
 def traced_add(self, seq):
-    """Hook for Scheduler.add: remember every Sequence by id (provided)."""
+    """Scheduler.add 的钩子：按 id 记下每个 Sequence（已实现）。"""
     _seqs[seq.seq_id] = seq
     return _orig_add(self, seq)
 
 
-# === Task 2 (observe + explain) — no code to write ===
-# After running, read the `--- trace ---` table this lab prints.
+# === Task 2 (observe + explain) — 无需写代码 ===
+# 跑完后阅读本 lab 打印的 `--- trace ---` 表格。
 #
-# Observe (already auto-verified by run_checks — no need to re-answer):
-#   * Your trace shows BOTH prompts prefilled together in the same step 0
-#     (seqs=[...] holds two ids).
-#   * In that prefill step, each seq's num_scheduled_tokens == its own prompt
-#     length; in every DECODE step each seq's num_scheduled_tokens == 1.
-#   (run_checks keys: "Task2 prefill nst==num_prompt_tokens",
-#    "Task2 decode nst all==1".)
+# Observe（已由 run_checks 自动验证，不必再答）：
+#   * 你的 trace 里两条 prompt 在同一个 step 0 PREFILL 中一起被算
+#     （seqs=[...] 里含两个 id）。
+#   * 在那个 prefill step 里，每条 seq 的 num_scheduled_tokens == 它各自的 prompt
+#     长度；而在每个 DECODE step 里每条 seq 的 num_scheduled_tokens == 1。
+#   （run_checks 对应的 key："Task2 prefill nst==num_prompt_tokens"、
+#    "Task2 decode nst all==1"。）
 #
-# Explain (self-check against ANSWERS.md §2 — NOT auto-graded):
-#   In your OWN words, why does each request's
-#   `total_steps == num_completion_tokens`?
-#   Hint: the prefill step ITSELF emits the first completion token — see
-#   scheduler.py:86-88 (the `continue` only fires for chunked prefill; when
-#   the whole prompt fits in one prefill, `append_token` runs), so every
-#   step a seq participates in appends exactly one token to it.
+# Explain（对照 ANSWERS.md §2 自检 —— 不自动判分）：
+#   用你自己的话讲：为什么每条 request 的
+#   `total_steps == num_completion_tokens`？
+#   提示：prefill 步本身就会吐出第 1 个 completion token —— 见
+#   scheduler.py:86-88（`continue` 只在 chunked prefill 时触发；当整条
+#   prompt 一次算完时 `append_token` 会照跑），所以一个 seq 参与的每一步
+#   都恰好 append 一个 token。
 #
-# IMPORTANT: Explain is NOT checked by run_checks. "All checks passed ✓"
-#   can come out even with Explain left blank — but leaving it blank means
-#   skipping the core takeaway of this lesson. Write your answer below.
+# 重要：Explain 不由 run_checks 判定。即便 Explain 留空，也可能打出
+#   "All checks passed ✓"，但空着它意味着跳过了本课的核心收获。请把答案写在下面。
 #
-# Your answer:
-#   (write here)
+# 你的答案：
+#   （在此作答）
 
 
 def traced_postprocess(self, seqs, token_ids, is_prefill):
-    """TODO(student) — Task 1 (trace): record this step into _trace, then call
-    the original via _orig_postprocess(self, seqs, token_ids, is_prefill).
+    """TODO(student) — Task 1 (trace)：把本步记进 _trace，再调用
+    原始实现 _orig_postprocess(self, seqs, token_ids, is_prefill)。
 
-    Capture each seq's num_scheduled_tokens BEFORE calling the original
-    (postprocess resets it to 0 at scheduler.py:85). Suggested record:
+    必须在调用原始实现之前抓取每条 seq 的 num_scheduled_tokens
+    （postprocess 会在 scheduler.py:85 把它清零）。建议的记录结构：
         {"is_prefill": is_prefill,
          "before": [(s.seq_id, s.num_scheduled_tokens, s.status.name), ...],
          "token_ids": list(token_ids),
@@ -63,22 +62,22 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
 
 
 def summarize_request(seq):
-    """TODO(student) — Task 3 (small wrapper): return
-    (num_prompt_tokens, num_completion_tokens, total_steps).
+    """TODO(student) — Task 3 (小封装)：返回
+    (num_prompt_tokens, num_completion_tokens, total_steps)。
 
-    total_steps = number of engine steps this seq participated in (count _trace).
+    total_steps = 这个 seq 参与过的 engine step 数（在 _trace 里数）。
     """
     raise NotImplementedError("Task 3: fill in summarize_request")
 
 
 def run_checks(max_tokens):
-    """Verify _trace against the request-lifecycle invariants.
+    """把 _trace 对照 request 生命周期的若干不变式进行校验。
 
-    Each invariant is evaluated across all sequences and reported once as a
-    conjunction (any sequence failing the invariant makes the check fail).
-    This keeps the result keys stable for dict-based lookups in tests.
+    每条不变式都横跨所有 sequence 一起评估，只报告一次（作为合取——
+    任一 sequence 不满足即判该 check 失败）。这样结果 key 保持稳定，
+    便于在测试里按名字查找。
     """
-    # Gather per-sequence intermediate values.
+    # 收集每条 seq 的中间量。
     per_seq = []
     for seq_id, seq in _seqs.items():
         steps = [r for r in _trace if any(b[0] == seq_id for b in r["before"])]
@@ -100,23 +99,23 @@ def run_checks(max_tokens):
         })
 
     results = []
-    # Task 1: state-machine trajectory (one prefill step, reached FINISHED,
-    # total_steps==num_completion_tokens).
+    # Task 1：状态机轨迹（恰好一个 prefill step、到达 FINISHED、
+    # total_steps==num_completion_tokens）。
     results.append(("Task1 one prefill step",
                     all(p["n_prefill_steps"] == 1 for p in per_seq)))
     results.append(("Task1 reached FINISHED",
                     all(p["finished"] for p in per_seq)))
     results.append(("Task1 trace recorded all steps (count==num_completion_tokens)",
                     all(p["n_steps"] == p["seq"].num_completion_tokens for p in per_seq)))
-    # Task 2: num_scheduled_tokens (prefill nst==num_prompt_tokens,
-    # decode nst all==1).
+    # Task 2：num_scheduled_tokens（prefill 的 nst==num_prompt_tokens、
+    # decode 的 nst 全为 1）。
     results.append(("Task2 prefill nst==num_prompt_tokens",
                     all(p["prefill_nst"] == [p["seq"].num_prompt_tokens] for p in per_seq)))
     results.append(("Task2 decode nst all==1",
                     all(len(p["decode_nst"]) > 0 and all(n == 1 for n in p["decode_nst"])
                         for p in per_seq)))
-    # Task 3: summarize_request (completion==len(completion_token_ids),
-    # completion<=max_tokens, total_steps==num_completion_tokens).
+    # Task 3：summarize_request（completion==len(completion_token_ids)、
+    # completion<=max_tokens、total_steps==num_completion_tokens）。
     results.append(("Task3 completion==len(completion_token_ids)",
                     all(p["completion"] == len(p["seq"].completion_token_ids) for p in per_seq)))
     results.append(("Task3 completion<=max_tokens",
