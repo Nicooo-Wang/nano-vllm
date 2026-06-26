@@ -23,15 +23,21 @@
 2. nano-vllm 的 KV 缓存精髓（paged 张量、slot_mapping 散射、store_kvcache 哨兵、prefix-cache 分支）适合"看它跑 + 手写一个几何函数"来理解；拆空重写丢整体直觉且卡壳风险高。
 3. 用户曾拒绝 v1"逐函数留空"粒度，v2 高粒度是有意收敛的结果；本课"继续用 L1 的标准"= hook + 一个小实现 + observe/explain。
 
-**大纲里 Q1/Q2/Q3 全是 observe + explain（连 Q1b 的 cu_seqlens 也是"手算核对"，不是函数实现）。** 本 spec 的关键补充：按 L1 标准补**一个动手 TODO 小实现** = `prefill_slot_mapping` 几何（用户已选），既补上 L1 式的"动手填一个小函数 + GPU-free 可判分点"，又恰好落在 L02 最难也最值的概念（paged slot_mapping 三段偏移几何）上。
+**大纲里 Q1/Q2/Q3 全是 observe + explain（连 Q1b 的 cu_seqlens 也是"手算核对"，不是函数实现）。** 本 spec 按 L1 标准补**动手 TODO**，且经用户确认落成**两个 construct 级动手任务**（非"逐函数留空"，均为 construct-to-prove-understanding，框架源码一行不改）：
 
-"代码框架" = `lab.py` 提供 **monkeypatch hook 壳** + `# TODO` 标记 + **一个自包含小函数桩**；**框架源码一行不改**。
+1. `prefill_slot_mapping` 几何（用户已选）——复现 `model_runner.py:151-161` 的 paged slot 散射，GPU-free 可判分，落在"paged 物理形态"概念上。
+2. `simulate_fa_calls` 手动调 FA（**用户追加**："让学生手动模拟 prefill/decode 阶段调 Flash Attention，学会接口怎么调用"）——构造 toy 输入、亲手调 `flash_attn_varlen_func` + `flash_attn_with_kvcache`，落在本课主轴"flash-attention 调用契约"上。这是 L02 标题（"从 flash-attention **调用**到 paged 张量"）的核心，observe → construct 升级。
+
+> **altitude 说明**：L1 基线是"至多一个关键小实现"。L02 经用户确认扩到**两个 construct 任务**——二者分别对应本课两个核心概念（FA 调用契约 / paged 几何），均为学生自构造自验证、**不挖空任何 nano-vllm 核心函数**。此扩展用户已批准，写明供 reviewer / student subagent 知悉。
+
+"代码框架" = `lab.py` 提供 **monkeypatch hook 壳** + `# TODO` 标记 + **两个自包含函数桩**（`prefill_slot_mapping` + `simulate_fa_calls`）；**框架源码一行不改**。
 
 ## 3. 目标 / 非目标
 
 **目标**（学完第 2 课，算子开发者能）：
 
 - 说清 flash-attention 在 prefill / decode 两阶段的**两个不同调用契约**：prefill 调 `flash_attn_varlen_func`（`q,k,v` packed + `cu_seqlens_q/k` + `max_seqlen_q/k` + 可选 `block_table`，`attention.py:67-70`）；decode 调 `flash_attn_with_kvcache`（`q.unsqueeze(1)` + `k_cache/v_cache` + `cache_seqlens=context_lens` + `block_table`，`attention.py:72-74`）。
+- **亲手在 toy 输入上调用这两个 FA 接口**（`simulate_fa_calls`）：构造 2 seqs 的 q/k/v，prefill 走 varlen、decode 走 paged-kvcache，断言 shape + 值交叉验证（decode 的 q = prefill 末 token 的 q ⇒ decode 输出 ≈ prefill 末 token 输出），证明 `cu_seqlens`/`cache_seqlens`/`block_table` 全设对——即"学会 FA 接口怎么调用"。
 - 解释 paged KV 张量物理形态 `(2, num_hidden_layers, num_kvcache_blocks, block_size, num_kv_heads, head_dim)`（`model_runner.py:115`），其中 `num_kv_heads = num_key_value_heads // world_size`（TP 下每 rank 只存自己的 kv heads，`model_runner.py:110`），`num_kvcache_blocks` 由剩余显存反推（`model_runner.py:113`，**非构造期旋钮**）。
 - 说清 `slot_mapping` 把 token 散射进 paged 缓存的几何：`block_id*block_size + 块内偏移`，首块再 `+= start%block_size`，末块按 `end - i*block_size` 截断（`model_runner.py:151-161`）；decode 单点 `block_table[-1]*block_size + last_block_num_tokens - 1`（`model_runner.py:181`）。
 - 解释 Triton `store_kvcache` kernel 的程序模型与 `slot==-1` 哨兵（`attention.py:10-30/23`）——为何 CUDA-graph 静态缓冲必须用 `-1` 占位、去掉会写到哪里（`model_runner.py:206-207`）。
@@ -70,11 +76,12 @@ course/lessons/lesson2/
 ## 6. TUTORIAL.md 结构（镜像 L1 的 §0–§5）
 
 - **§0 环境初始化**：指向 `course/lessons/lesson1/TUTORIAL.md §0` 的通用工序（不重复造）；点明 L02 Q3b 额外需要 `enforce_eager=False`（cudagraph 可用）。
-- **§1 学完你能**：4 条目标（对齐 §3 目标）。
+- **§1 学完你能**：5 条目标（对齐 §3 目标）。
 - **§2 全景图**（mermaid）：prefill / decode 两条 flash-attention 调用路径 + paged KV 张量 `(2,L,num_blocks,bs,kv_heads,D)` + **Context 作为调度(主进程)↔计算(Attention层)的解耦桥梁**（L02 结构主轴）+ slot_mapping 散射示意。**禁止中英文混排 ASCII 框图**（ROLES ②）。
 - **§3 逐段讲（逐条核过的 file:line）**：
   - prefill varlen 调用 `attention.py:64-70`（含前缀缓存命中分支 `65-66`）
   - decode kvcache 调用 `attention.py:72-74`（`q.unsqueeze(1)` + `cache_seqlens=context.context_lens` + `block_table`）
+  - **worked example（Task 3 前置教学，必写）**：学生不会用 FA 接口，讲义须用 toy 输入（2 seqs 长 [3,2]、GQA）**完整示范**两个签名的调用——prefill `flash_attn_varlen_func`（q/k/v packed + cu_seqlens + max_seqlen + softmax_scale + causal）与 decode `flash_attn_with_kvcache`（q.unsqueeze(1) + k_cache/v_cache + cache_seqlens + block_table），逐参数讲 shape 约定 + prefill/decode 差异。学生进 lab 前已见过完整样例，Task 3 是"照着样例在 toy 输入上自己调一遍"。
   - paged 张量 + `num_kv_heads//world_size` + `block_bytes` + `num_kvcache_blocks` 反推 `model_runner.py:110/112/113/115`（点到每 rank 只存自己 kv heads，不展开跨 rank）
   - `store_kvcache` kernel + `slot==-1` 哨兵 `attention.py:10-30/23` + launcher 断言 `36-39`
   - slot_mapping 几何 `model_runner.py:151-161`（首块 `+= start%block_size`、末块截断）+ decode 单点 `model_runner.py:181`
@@ -85,7 +92,7 @@ course/lessons/lesson2/
 
 讲义语气（ROLES ③）：预先验证、直接可跑的 step-by-step；**禁止**开发过程叙述（"为什么不直接 X / 这里有个坑 / 踩过 / 会失败"）。
 
-## 7. lab.py 三任务（镜像 L1 的 hook + 小实现 + observe/explain）
+## 7. lab.py 四任务（镜像 L1 的 hook + 小实现 + observe/explain；L02 多一个 construct 任务）
 
 **通用机制**：`lab.py` 顶部 monkeypatch 两个点，源码不改：
 - `Attention.forward` → `traced_attention_forward`（抓 FA 真实调用）。
@@ -129,12 +136,58 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
 
 > **`start>0`（首块偏移分支）分工**：单 prompt fresh prefill 触发不到（`start=0`）；该分支由 **GPU-free 合成单测**覆盖（喂 `start=300` 的 chunked case）。TUTORIAL 显式说明此分工——函数必须通用，live run 展示常见 `start=0`，单测覆盖 `start>0`。
 
-### Task 3 · observe + explain（无代码，写注释 + ANSWERS 判分）
+### Task 3 · construct — `simulate_fa_calls`（手动调 FA，用户追加；**重帮助 + UT + 失败诊断**）
+
+> **用户强调**：学生**不会用** Flash Attention 接口，且 prefill / decode 调法不同。故本 Task 不是裸 TODO，而是**讲义先教 + lab 引导 + UT 验证 + 失败给诊断**三位一体。三件事（用户原话）：① 给一定帮助；② 用 UT 之类工具检查调用正确与否；③ 调用失败应抛异常 + 辅助信息。
+
+**(1) 讲义先教（§3 worked example，见 §6）**：TUTORIAL 显式给出两个 FA 签名的 worked example（prefill varlen vs decode kvcache），逐参数讲清 shape 约定与 prefill/decode 差异，学生进 lab 前已看过完整调用样例。
+
+**(2) lab 引导 + 焦点 TODO**：函数签名**注入 FA callable**，便于 GPU-free mock 测试：
+```python
+def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
+    """TODO(student) — Task 3：在 toy 输入上调两个 FA 接口。
+    fa_varlen / fa_kvcache 由 main() 传入真实 flash_attn 函数（测试传 mock）；
+    你只需正确「调用」它们——焦点在 prefill/decode 各传什么参数。
+    返回 (prefill_out, decode_out)。镜像 attention.py:67-70 / 72-74。"""
+    import torch
+    num_heads, num_kv_heads, head_dim = 4, 1, 64
+    scale = head_dim ** -0.5
+    # —— toy 输入（已给，不必填）：2 seqs，长 [3,2] ——
+    q = torch.randn(5, num_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn(5, num_kv_heads, head_dim, device=device, dtype=dtype)
+    v = torch.randn(5, num_kv_heads, head_dim, device=device, dtype=dtype)
+    cu_seqlens_q = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    cu_seqlens_k = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    # —— TODO(student) ①：调 prefill（flash_attn_varlen_func 契约）——
+    prefill_out = fa_varlen(...)     # 传 q,k,v + cu_seqlens_q/k + max_seqlen_q/k + softmax_scale + causal
+    # —— decode 的 cache（已给）：paged (num_blocks, block_size, kv_heads, head_dim) ——
+    q_dec = torch.stack([q[2], q[4]])                       # 各 seq 末 token 的 q → 值交叉验证成立
+    k_cache = torch.zeros(2, 4, num_kv_heads, head_dim, device=device, dtype=dtype)
+    v_cache = torch.zeros_like(k_cache)
+    k_cache[0, :3], k_cache[1, :2] = k[:3], k[3:5]          # 简单切片预填（非 store_kvcache kernel）
+    v_cache[0, :3], v_cache[1, :2] = v[:3], v[3:5]
+    block_table = torch.tensor([[0], [1]], dtype=torch.int32, device=device)   # seq→block
+    cache_seqlens = torch.tensor([3, 2], dtype=torch.int32, device=device)
+    # —— TODO(student) ②：调 decode（flash_attn_with_kvcache 契约）——
+    decode_out = fa_kvcache(...).squeeze(1)   # q_dec.unsqueeze(1) + k_cache/v_cache + cache_seqlens + block_table + scale + causal
+    return prefill_out, decode_out
+```
+**焦点**：学生填两处 `...`——prefill 与 decode 各传什么参数（cu_seqlens vs cache_seqlens、要不要 unsqueeze、block_table 怎么传）。toy 输入构造已给，避免学生在张量搭建上卡壳，把精力集中到"调用契约"。
+
+**(3) 失败诊断（`FAContractError`，给辅助信息）**：lab 提供一个**判分 + 诊断**函数 `_verify_fa_calls(prefill_out, decode_out, q, ...)`（**已给、非 TODO**），对结果做 shape 断言 + 值交叉验证，失败时抛 `FAContractError` 并把"可能的错 + 改法 + 镜像哪行"打出来，例如：
+- prefill 输出 shape 错 → "prefill_out 应为 (total=5, nheads, head_dim) packed；你是不是把 cu_seqlens 传成了 per-seq padding？镜像 attention.py:67-70。"
+- decode shape 错 → "decode_out 应为 (num_seqs, nheads, head_dim)；你是不是漏了 `.unsqueeze(1)`（q 需注入 seq_len=1 维）？镜像 attention.py:72。"
+- 值交叉验证不过 → "decode_out 应 ≈ prefill 各 seq 末 token 输出；检查 cache_seqlens（每 seq 有效 KV 数）与 block_table（seq→物理块）是否对齐预填。"
+`simulate_fa_calls` 的真实调用包在 try/except：捕获 flash_attn 自身报错（shape 不符会抛 RuntimeError/AssertionError）→ 重抛 `FAContractError` 带上下文，不让学生直面裸 flash_attn traceback。
+
+**焦点在 FA 调用契约，不在 cache 散射**：cache 用简单切片预填（非 Task2 的 slot_mapping 散射、非 store_kvcache kernel），避免与 Task2 重复、不越界到"手管 cache"。Task2 的几何在此**不**复用（用户选 A 非 C）。
+
+### Task 4 · observe + explain（无代码，写注释 + ANSWERS 判分）
 
 - **Observe（`run_checks` 机判）**：prefill `q.shape` 是 packed `(total_tokens, H, D)`（非按 seq padded）；decode `q.shape` 是 `(num_seqs, H, D)`（`attention.py:72` 的 `unsqueeze(1)` 在调用 FA 前注入 query 维）；手算 `cu_seqlens_q` 与打印值一致。
 - **Explain（rubric，对照 `ANSWERS.md`，不机判）**：① 为何 prefill 用 varlen（packed、无 padding）而非 padded batched attention？② decode 为何要 `q.unsqueeze(1)`（注入 `seq_len=1` 的 query 维）而 prefill 不需要？`cache_seqlens=context.context_lens` 与 `block_table=context.block_tables` 各自职责？③ prefill vs decode 在 FA 用法上的根本差异？④ `-1` 哨兵为何必要、去掉会写到哪里？
 
-学生把 explain 写在 `lab.py` 的 `=== Task 3 (observe + explain) ===` 注释块里。
+学生把 explain 写在 `lab.py` 的 `=== Task 4 (observe + explain) ===` 注释块里。
 
 ## 8. 验证（镜像 L1 的双层）
 
@@ -144,6 +197,11 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
 - **`prefill_slot_mapping` 两 case**（用**非连续** block_id 测散射，否则槽恰好连续会掩盖 `block_id*block_size` 映射）：
   - fresh：`block_table=[7,3,9], block_size=256, start=0, num_tokens=600` → 期望 `list(range(1792,2048)) + list(range(768,1024)) + list(range(2304,2432))`（256+256+88；首块 offset=0、末块截断 88）。
   - chunked：`block_table=[7,3,9], block_size=256, start=300, num_tokens=256` → 期望 `list(range(812,1024)) + list(range(2304,2348))`（212+44；首块 `+= start%block_size=44`、末块截断到 `end - i*block_size`，此 case 专测首块偏移分支）。
+- **`simulate_fa_calls` 调用契约（mock FA，CPU + float32）**（**用户要求"用 UT 检查调用正确与否"**）：注入 mock `fa_varlen`/`fa_kvcache`（device='cpu', dtype=float32），mock 在**被调时**校验学生传的参数契约并返回 shape 正确的 stub：
+  - mock `fa_varlen`：断言 `q.ndim==3`、`cu_seqlens_q[0]==0`、单调不减、`cu_seqlens_q[-1]==q.shape[0]`、`causal==True`；返回 `(total, nheads, head_dim)`。
+  - mock `fa_kvcache`：断言 `q.ndim==4 and q.shape[1]==1`（即 `.unsqueeze(1)` 注入了 seq_len=1）、`block_table.ndim==2`、`cache_seqlens.ndim==1`；返回 `(num_seqs, 1, nheads, head_dim)`。
+  - 学生调错（如 decode 漏 `unsqueeze`）→ mock 抛错 → 测试 FAIL 并定位。
+- **失败诊断（`FAContractError`）UT**（**用户要求"调用失败抛异常 + 辅助"**）：测 `_verify_fa_calls` 在喂错结果时抛 `FAContractError` 且 message 含诊断关键词（如 "unsqueeze"、"cu_seqlens"、"cache_seqlens"）；含"故意传错 shape → 期望 FAContractError"的反例。
 - **trace 记录 / `run_checks` 逻辑**：用合成 `_trace` 喂，含"喂错 slot / 喂错 cu_seqlens 故意 FAIL"的反例（同 L1 的 `catches_corrupt_*`）。
 
 ### 端到端（`solution/lab_solved.py`）
@@ -157,13 +215,18 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
 - **Run 2 `enforce_eager=False`**（同样两条 prompt）：读 `llm.model_runner.graph_vars["slot_mapping"]`（graph decode 后 `[bs:]` 段仍是 `-1`，即哨兵活体证据），打印佐证 Q3b。`graph_vars` 是持久 dict（`model_runner.py:250-257`），graph decode 后其中 `slot_mapping` 状态 = `fill_(-1)` 后被 `[:bs]` 覆盖 → 尾部 `-1` 可见。
 - **D1 fallback**：若 Run 2 的 `capture_cudagraph`（`model_runner.py:222-257`）在本卡抛错或 `graph_vars` 不可达，**Q3b 自动降级为 explain-from-code**（读 `model_runner.py:206-207` + `attention.py:23` 解释哨兵机制与越界后果），Run 2 跳过；`run_checks` 不依赖 Run 2（Q3b 不进机判）。lab 在 Run 2 失败时打一条说明而非崩溃。
 
-`run_checks` 命名断言（机判；Task3 explain 不进）：
+`run_checks` 命名断言（机判，跑在端到端真实 FA 上；Task4 explain 不进）：
 - `Task1 captured prefill varlen call`
 - `Task1 captured decode kvcache call`
 - `Task1 prefill q.shape is packed (total,H,D)`
 - `Task2 prefill_slot_mapping matches captured slot_mapping`
-- `Task3 prefill cu_seqlens_q == [0, a, a+b]`
-- `Task3 decode q.shape is (num_seqs,H,D)`
+- `Task3 simulate prefill out shape (total,H,D)`
+- `Task3 simulate decode out shape (num_seqs,H,D)`
+- `Task3 decode out == prefill last-token out (allclose)` —— 值交叉验证，证 `cache_seqlens`/`block_table`/cache 预填全对
+- `Task4 prefill cu_seqlens_q == [0, a, a+b]`
+- `Task4 decode q.shape is (num_seqs,H,D)`
+
+> Task3 的三条断言由 `_verify_fa_calls`（§7 Task3）在真实 FA 输出上执行；调用本身若参数错，`simulate_fa_calls` 的 try/except 先抛 `FAContractError`（带诊断）而非裸 flash_attn traceback。GPU-free UT（mock FA）只验调用契约 + 诊断，不跑值交叉验证（mock 无真实语义）。
 
 全过打印 `All checks passed ✓`；有 FAIL 打印哪条挂了、`SystemExit(1)` 退出。`lab.py` 未填 TODO 时 `raise NotImplementedError`（fail-closed，同 L1）。
 
@@ -187,7 +250,8 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
 第 2 课可交付 = 同时满足：
 
 - `TUTORIAL.md` 含 §0–§5，锚点 `file:line` 准（逐条 grep 核对源码，含 lab.py 内部行号）。
-- `lab.py` 三任务 TODO 清晰，`.venv/bin/python course/lessons/lesson2/solution/lab_solved.py` 在装好依赖的机器上跑通并打印 `All checks passed ✓`。
+- `lab.py` **四任务** TODO 清晰（hook + slot_mapping + `simulate_fa_calls` + observe/explain），`.venv/bin/python course/lessons/lesson2/solution/lab_solved.py` 在装好依赖的机器上跑通并打印 `All checks passed ✓`。
+- **Task 3 帮助 + UT + 诊断齐全**（用户三项要求）：TUTORIAL §3 含两个 FA 签名的 worked example；`simulate_fa_calls` 焦点 TODO 在调用参数 + toy 输入已给；GPU-free UT（mock FA）验调用契约；调用失败抛 `FAContractError` 带诊断（非裸 traceback）。
 - `python course/lessons/lesson2/solution/test_checks.py`（GPU-free）全过。
 - fail-fast 环境探测可用；未填 TODO 时 fail-closed。
 - **两轮**：reviewer subagent 按八维审**无阻塞 / 重要项** + student subagent 盲测**无阻塞性卡点**。
@@ -199,6 +263,8 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
 - **Task2 端到端 `(block_table, start, num_tokens)` 的捕获点**：倾向 post-run 从 `_seqs`（`traced_add` 记录）读 `seq.block_table` + 用 `start=0`（fresh）+ `num_tokens = len(prompt token_ids)`（lab 自己 tokenize，长度已知）重建；若发现 `seq.block_table` 在 FINISHED/deallocate 后被清，改 hook `ModelRunner.prepare_prefill` 入口捕获（plan 阶段定）。
 - **prompt 构造**：Run 1 用两条英文 prompt——seq_A tokenize 到 >512（跨 ≥3 个 block_size=256 块，展示首/中/末三段），seq_B 短；精确长度不必硬编码（Task2 闭环用 captured `cu_seqlens_q[1]` 自校准切片边界）。
 - **多卡（tp>1）**不在第 2 课范围（tp=1 即可）。
+- **`flash_attn_with_kvcache` 签名版本敏感**：其 kwargs（`cache_seqlens`/`block_table`/paged cache 布局）随 flash-attn 版本变化；本机锁 2.8.3。Task 3 的 `simulate_fa_calls` **必须镜像 nano-vllm 已验证可跑的调用形**（`attention.py:72-74`）——实现时直接对照，勿凭记忆写签名。`fa_varlen`/`fa_kvcache` 由 main() 注入真实函数，签名以 2.8.3 为准。
+- **值交叉验证容差**：bf16 下 `torch.allclose(decode_out, expected, atol=1e-2)`；实现时若 2.8.3 数值噪声更大，放宽 atol 并在 ANSWERS 注明（不视为正确性阻塞）。
 - enactment（D2=A）已在 §9 定为 subagent 循环，不再悬置。
 
 ## 12. 源码锚点清单（本 session 已逐个 grep 核验，全部准确）
