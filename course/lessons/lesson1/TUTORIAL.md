@@ -378,7 +378,7 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
 
 **输入**：一个 `seq`（`Sequence` 对象）。
 
-**要做的事**：返回三元组 `(num_prompt_tokens, num_completion_tokens, total_steps)`。前两个直接从 `seq` 的 property 取（`num_prompt_tokens`、`num_completion_tokens`，见 `sequence.py:43-45`）；`total_steps` 要去 `_trace` 里数这个 `seq_id` 出现了几次（每个 step 的 `before` 里有 `seq_id`）。
+**要做的事**：返回三元组 `(num_prompt_tokens, num_completion_tokens, total_steps)`。前两个直接从 `seq` 取——`num_prompt_tokens` 是 `__init__` 里设的属性（`sequence.py:24`），`num_completion_tokens` 是 property（`sequence.py:43-45`）；`total_steps` 要去 `_trace` 里数这个 `seq_id` 出现了几次（每个 step 的 `before` 里有 `seq_id`）。
 
 ```python
 def summarize_request(seq):
