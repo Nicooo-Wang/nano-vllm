@@ -19,7 +19,21 @@ def traced_add(self, seq):
 
 
 def traced_postprocess(self, seqs, token_ids, is_prefill):
-    raise NotImplementedError("Task 2")
+    """TODO(student): record this step into _trace, then call the original.
+
+    Each seq still carries its num_scheduled_tokens at entry (postprocess
+    resets it to 0 internally at scheduler.py:85), so capture it in `before`.
+    """
+    before = [(s.seq_id, s.num_scheduled_tokens, s.status.name) for s in seqs]
+    result = _orig_postprocess(self, seqs, token_ids, is_prefill)
+    after = [(s.seq_id, s.status.name, s.is_finished) for s in seqs]
+    _trace.append({
+        "is_prefill": is_prefill,
+        "before": before,
+        "token_ids": list(token_ids),
+        "after": after,
+    })
+    return result
 
 
 def summarize_request(seq):

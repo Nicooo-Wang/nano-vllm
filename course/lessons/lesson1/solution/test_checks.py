@@ -15,6 +15,30 @@ def test_traced_add_captures_and_calls_original():
     assert lab._seqs[99] is seq
 
 
+def test_traced_postprocess_records_before_calls_then_after():
+    called = []
+    seqs = [types.SimpleNamespace(
+        seq_id=7, num_scheduled_tokens=3,
+        status=types.SimpleNamespace(name="RUNNING"), is_finished=False)]
+    lab._trace = []
+
+    def fake_orig(self, seqs, token_ids, is_prefill):
+        called.append((self, is_prefill))
+        seqs[0].status.name = "FINISHED"
+        seqs[0].is_finished = True
+
+    lab._orig_postprocess = fake_orig
+    lab.traced_postprocess("SELF", seqs, [42], True)
+
+    assert called == [("SELF", True)], "must call original exactly once"
+    assert len(lab._trace) == 1
+    rec = lab._trace[0]
+    assert rec["is_prefill"] is True
+    assert rec["before"] == [(7, 3, "RUNNING")], "capture nst BEFORE original"
+    assert rec["token_ids"] == [42]
+    assert rec["after"] == [(7, "FINISHED", True)], "capture status AFTER original"
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":
