@@ -67,6 +67,25 @@ def test_traced_attention_forward_records_only_layer0_and_calls_original():
     assert len(lab._trace) == 2
 
 
+def test_prefill_slot_mapping_fresh_noncontiguous():
+    # 3 blocks of 256, non-contiguous block ids so scatter is visible; start=0
+    got = lab.prefill_slot_mapping([7, 3, 9], 256, start=0, num_tokens=600)
+    expected = (list(range(7 * 256, 7 * 256 + 256))      # block 7, full (256)
+                + list(range(3 * 256, 3 * 256 + 256))    # block 3, full (256)
+                + list(range(9 * 256, 9 * 256 + 88)))    # block 9, last truncated (600-512=88)
+    assert got == expected
+    assert len(got) == 600
+
+
+def test_prefill_slot_mapping_chunked_first_block_offset():
+    # start=300 → first block offset += 300%256=44; last block truncated to end - i*block_size
+    got = lab.prefill_slot_mapping([7, 3, 9], 256, start=300, num_tokens=256)   # end=556
+    expected = (list(range(3 * 256 + 44, 3 * 256 + 256))    # block 3 (start_block=1), 212 slots
+                + list(range(9 * 256, 9 * 256 + 44)))       # block 9 (last), 556-512=44 slots
+    assert got == expected
+    assert len(got) == 256
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":

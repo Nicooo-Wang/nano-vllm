@@ -63,7 +63,26 @@ def traced_attention_forward(self, q, k, v):
 
 
 def prefill_slot_mapping(block_table, block_size, start, num_tokens):
-    raise NotImplementedError("Task 2: fill in prefill_slot_mapping")
+    """TODO(student) — Task 2: reproduce model_runner.py:151-161 prefill slot scatter.
+
+    Each token maps to physical slot block_id*block_size + in-block offset. The first
+    block's start is further offset by start%block_size; the last block is truncated to
+    end - i*block_size.
+    """
+    end = start + num_tokens
+    start_block = start // block_size
+    end_block = (end + block_size - 1) // block_size
+    slots = []
+    for i in range(start_block, end_block):
+        slot_start = block_table[i] * block_size
+        if i == start_block:
+            slot_start += start % block_size
+        if i != end_block - 1:
+            slot_end = block_table[i] * block_size + block_size
+        else:
+            slot_end = block_table[i] * block_size + end - i * block_size
+        slots.extend(range(slot_start, slot_end))
+    return slots
 
 
 def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
