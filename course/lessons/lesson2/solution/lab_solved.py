@@ -39,7 +39,27 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
 
 
 def traced_attention_forward(self, q, k, v):
-    raise NotImplementedError("Task 1: fill in the FA-call trace recording")
+    """TODO(student) — Task 1: record this step's flash-attention call into _trace,
+    then call _orig_attention_forward(self, q, k, v).
+
+    Attention.forward fires once per layer per step (num_hidden_layers times); every
+    layer in a step shares the same context & shapes, so only LAYER 0 records.
+    """
+    if _layer_order.setdefault(id(self), len(_layer_order)) == 0:
+        context = _get_context()
+        is_prefill = context.is_prefill
+        _trace.append({
+            "is_prefill": is_prefill,
+            "q_shape": tuple(q.shape), "k_shape": tuple(k.shape), "v_shape": tuple(v.shape),
+            "cu_seqlens_q": context.cu_seqlens_q.tolist() if is_prefill else None,
+            "cu_seqlens_k": context.cu_seqlens_k.tolist() if is_prefill else None,
+            "max_seqlen_q": context.max_seqlen_q, "max_seqlen_k": context.max_seqlen_k,
+            "context_lens": context.context_lens.tolist() if not is_prefill else None,
+            "block_tables": (tuple(context.block_tables.shape)
+                             if context.block_tables is not None else None),
+            "slot_mapping": context.slot_mapping.tolist(),
+        })
+    return _orig_attention_forward(self, q, k, v)
 
 
 def prefill_slot_mapping(block_table, block_size, start, num_tokens):

@@ -25,6 +25,48 @@ def test_traced_postprocess_snapshots_block_table_before_original():
     assert lab._seq_blocks[7] == [3, 8], "must snapshot block_table BEFORE original clears it"
 
 
+def _fake_context(is_prefill):
+    return types.SimpleNamespace(
+        is_prefill=is_prefill,
+        cu_seqlens_q=types.SimpleNamespace(tolist=lambda: [0, 3, 5]),
+        cu_seqlens_k=types.SimpleNamespace(tolist=lambda: [0, 3, 5]),
+        max_seqlen_q=3, max_seqlen_k=3,
+        context_lens=types.SimpleNamespace(tolist=lambda: [3, 2]),
+        block_tables=types.SimpleNamespace(shape=(2, 1)),
+        slot_mapping=types.SimpleNamespace(tolist=lambda: [10, 11, 12, 13, 14]),
+    )
+
+
+def _fake_qkv(shape):
+    return types.SimpleNamespace(shape=shape)
+
+
+def test_traced_attention_forward_records_only_layer0_and_calls_original():
+    lab._trace = []
+    lab._layer_order = {}
+    lab._get_context = lambda: _fake_context(is_prefill=True)
+    returned = []
+    lab._orig_attention_forward = lambda self, q, k, v: returned.append("orig") or "OUT"
+
+    layer0 = object()                       # first Attention module
+    layer1 = object()                       # second Attention module
+    out = lab.traced_attention_forward(layer0, _fake_qkv((5, 4, 64)), _fake_qkv((5, 1, 64)), _fake_qkv((5, 1, 64)))
+    lab.traced_attention_forward(layer1, _fake_qkv((5, 4, 64)), _fake_qkv((5, 1, 64)), _fake_qkv((5, 1, 64)))
+
+    assert out == "OUT" and returned == ["orig", "orig"], "original runs once per layer (only recording is layer-0-gated) and passes through"
+    assert len(lab._trace) == 1, "only layer 0 records; layer 1 must be skipped"
+    rec = lab._trace[0]
+    assert rec["is_prefill"] is True
+    assert rec["q_shape"] == (5, 4, 64) and rec["k_shape"] == (5, 1, 64)
+    assert rec["cu_seqlens_q"] == [0, 3, 5]
+    assert rec["context_lens"] is None      # prefill record does not store context_lens
+    assert rec["block_tables"] == (2, 1)
+    assert rec["slot_mapping"] == [10, 11, 12, 13, 14]
+    # second call from the SAME layer0 must also record (one trace row per step)
+    lab.traced_attention_forward(layer0, _fake_qkv((5, 4, 64)), _fake_qkv((5, 1, 64)), _fake_qkv((5, 1, 64)))
+    assert len(lab._trace) == 2
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":
