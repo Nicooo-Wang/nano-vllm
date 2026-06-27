@@ -38,6 +38,25 @@ def traced_postprocess(self, seqs, token_ids, is_prefill):
     return _orig_postprocess(self, seqs, token_ids, is_prefill)
 
 
+# === Task 4 (observe + explain) — 把你的答案写在下面 ===
+#
+# Observe（run_checks 自动验证，不必再答）：prefill 的 q 是 packed (total,H,D)；
+#   decode 的 q 是 (num_seqs,H,D)，attention.py:72 的 unsqueeze(1) 注入了 query 维。
+#
+# Explain（对照 solution/ANSWERS.md §4 自检，不自动判分）。用你自己的话答：
+# 1. 为什么 prefill 用 packed varlen（无 padding）而非 padded batched attention？
+# 2. decode 为什么需要 q.unsqueeze(1)（注入 seq_len=1 的 query 维）而 prefill 不需要？
+#    cache_seqlens 与 block_table 各自的职责？
+# 3. prefill 与 decode 在 FA 用法上的根本差异？
+# 4. cudagraph 的 -1 哨兵为什么必要？去掉会写到哪里？（model_runner.py:206-207 + attention.py:23）
+#
+# 你的答案：
+# 1.
+# 2.
+# 3.
+# 4.
+
+
 def traced_attention_forward(self, q, k, v):
     """TODO(student) — Task 1 (trace): record this step's flash-attention call into
     _trace, then call _orig_attention_forward(self, q, k, v).
@@ -45,8 +64,11 @@ def traced_attention_forward(self, q, k, v):
     Only LAYER 0 records (Attention.forward fires once per layer per step; every layer
     in a step shares context & shapes). Use:
         if _layer_order.setdefault(id(self), len(_layer_order)) == 0: ...
-    Suggested record:
-        {"is_prefill": context.is_prefill,
+    (`setdefault` returns the ALREADY-STORED value on later calls, so only the first
+    Attention module ever seen maps to index 0 — hence "layer 0".)
+    Capture a local first, then build the record:
+        is_prefill = context.is_prefill
+        {"is_prefill": is_prefill,
          "q_shape": tuple(q.shape), "k_shape": tuple(k.shape), "v_shape": tuple(v.shape),
          "cu_seqlens_q": context.cu_seqlens_q.tolist() if is_prefill else None,
          "cu_seqlens_k": context.cu_seqlens_k.tolist() if is_prefill else None,

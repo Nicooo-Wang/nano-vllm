@@ -230,8 +230,8 @@ v_cache[0, :3] = v[:3]
 v_cache[1, :2] = v[3:5]
 
 block_table = torch.tensor([[0],     # 第 0 条序列的逻辑 token 在物理 block 0
-                            [1]])    # 第 1 条序列的逻辑 token 在物理 block 1
-cache_seqlens = torch.tensor([3, 2]) # 每条序列在 cache 里有几个有效 KV token
+                            [1]], dtype=torch.int32)    # 第 1 条 → block 1（flash-attn 要求 int32）
+cache_seqlens = torch.tensor([3, 2], dtype=torch.int32) # 每条序列有效 KV 数（flash-attn 要求 int32）
 ```
 
 **完整调用**（对齐 `attention.py:72-74`）：
@@ -487,7 +487,7 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
 
 **输入**：`(fa_varlen, fa_kvcache, device, dtype)`——`fa_varlen`/`fa_kvcache` 是 `main()` 传进来的**真实** `flash_attn.flash_attn_varlen_func` / `flash_attn_with_kvcache`（测试里是 mock）。你**只负责调它们**，不构造 mock。
 
-**要做的事**：按 §3.3 worked example 的 toy 输入（2 seqs 长 [3,2]、GQA `num_heads=4/num_kv_heads=1/head_dim=64`）调两个接口，返回 `(prefill_out, decode_out)`。toy 的 q/k/v/cache/block_table/cache_seqlens lab 已经替你构造好了（见 `lab.py` 里 `simulate_fa_calls` 的 docstring + 代码骨架），你只需填两个 `# TODO(student)` 标记的调用。
+**要做的事**：按 §3.3 worked example 的 toy 输入（2 seqs 长 [3,2]、GQA `num_heads=4/num_kv_heads=1/head_dim=64`）调两个接口，返回 `(prefill_out, decode_out)`。toy 输入的构造形（`q/k/v` 的 shape、`cu_seqlens`、cache 预填、`block_table`/`cache_seqlens` 的值与 **int32** dtype）已在 `lab.py` 里 `simulate_fa_calls` 的 docstring + §3.3 写全——你照着构造出这些张量，再填两处 `# TODO(student)` 标记的 FA 调用即可。**注意**：`block_table`/`cache_seqlens` 必须是 `torch.int32`（flash-attn 拒绝 int64）；调错参数时 `FAContractError` 会提示镜像 `attention.py` 的哪几行。
 
 **关键**：对照 `attention.py:67-70`（prefill）和 `:72-74`（decode）的调用形状。prefill 传 `cu_seqlens_q/k=[0,3,5]`、`max_seqlen_q/k=3`；decode 传 `q_dec.unsqueeze(1)`、`cache_seqlens=[3,2]`、`block_table=[[0],[1]]`。两个调用都要包在 `try/except` 里：`FAContractError` 原样 raise，其他异常包成 `FAContractError("...mirror attention.py:67-70/72-74...")`。
 
