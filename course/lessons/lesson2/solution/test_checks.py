@@ -86,6 +86,75 @@ def test_prefill_slot_mapping_chunked_first_block_offset():
     assert len(got) == 256
 
 
+def _make_mock_fa(device="cpu", dtype=None):
+    """Mock fa_varlen/fa_kvcache that (a) validate the calling contract at call time and
+    (b) return cross-check-consistent stubs. Uses function-local torch (no GPU needed)."""
+    import torch
+    if dtype is None:
+        dtype = torch.float32
+    state = {}
+    total, num_heads, head_dim = 5, lab.TOY_NUM_HEADS, lab.TOY_HEAD_DIM
+
+    def mock_varlen(q, k, v, *, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                    softmax_scale, causal):
+        assert q.ndim == 3, "varlen q must be packed (total, nheads, head_dim), not per-seq padded"
+        assert tuple(q.shape)[0] == cu_seqlens_q[-1], "cu_seqlens_q[-1] must equal total tokens"
+        assert causal is True
+        state["prefill"] = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        return state["prefill"]
+
+    def mock_kvcache(q, k_cache, v_cache, *, cache_seqlens, block_table,
+                     softmax_scale, causal):
+        assert q.ndim == 4 and tuple(q.shape)[1] == 1, \
+            "kvcache q must be (batch, seqlen=1, nheads, head_dim) — did you q_dec.unsqueeze(1)?"
+        assert block_table.ndim == 2, "block_table must be 2-D (seq -> physical blocks)"
+        assert cache_seqlens.ndim == 1, "cache_seqlens must be 1-D (valid KV count per seq)"
+        pf = state["prefill"]
+        # cross-check-consistent stub: decode reads the same KV as prefill's last token
+        return torch.stack([pf[2], pf[4]]).unsqueeze(1)   # (2,1,num_heads,head_dim)
+
+    return mock_varlen, mock_kvcache
+
+
+def test_simulate_fa_calls_correct_contract():
+    import torch
+    mv, mk = _make_mock_fa()
+    prefill_out, decode_out = lab.simulate_fa_calls(mv, mk, "cpu", torch.float32)
+    # _verify_fa_calls should pass on a correct call
+    failed = [n for n, ok in lab._verify_fa_calls(prefill_out, decode_out) if not ok]
+    assert not failed, f"correct call should verify clean, failed: {failed}"
+
+
+def test_simulate_fa_calls_wraps_fa_errors():
+    import torch
+
+    def raising(*a, **k):
+        raise RuntimeError("fake flash_attn shape error")
+
+    try:
+        lab.simulate_fa_calls(raising, raising, "cpu", torch.float32)
+        assert False, "should have raised FAContractError"
+    except lab.FAContractError as e:
+        assert "attention.py" in str(e), "diagnostic must point at attention.py to mirror"
+
+
+def test_verify_fa_calls_rejects_value_mismatch():
+    import torch
+    prefill_out = torch.randn(5, 4, 64)
+    decode_out = torch.randn(2, 4, 64)   # NOT equal to stack([prefill_out[2], prefill_out[4]])
+    failed = [n for n, ok in lab._verify_fa_calls(prefill_out, decode_out) if not ok]
+    assert any("cache_seqlens" in n or "allclose" in n for n in failed), \
+        "value mismatch must flag the cross-check naming cache_seqlens/block_table"
+
+
+def test_verify_fa_calls_rejects_bad_prefill_shape():
+    import torch
+    bad_prefill = torch.randn(7, 4, 64)   # wrong total dim
+    decode_out = torch.randn(2, 4, 64)
+    failed = [n for n, ok in lab._verify_fa_calls(bad_prefill, decode_out) if not ok]
+    assert any("prefill out shape" in n for n in failed)
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":

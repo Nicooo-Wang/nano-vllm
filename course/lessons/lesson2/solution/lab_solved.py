@@ -85,12 +85,61 @@ def prefill_slot_mapping(block_table, block_size, start, num_tokens):
     return slots
 
 
-def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
-    raise NotImplementedError("Task 3: fill in the two flash-attention calls")
-
-
 def _verify_fa_calls(prefill_out, decode_out):
-    raise NotImplementedError("Task 4b: fill in _verify_fa_calls")
+    """Check simulate_fa_calls outputs (PROVIDED). Returns list[(name, ok)]."""
+    import torch
+    total, num_seqs, num_heads, head_dim = 5, 2, TOY_NUM_HEADS, TOY_HEAD_DIM
+    results = []
+    results.append(("Task3 simulate prefill out shape (total,H,D)",
+                    tuple(prefill_out.shape) == (total, num_heads, head_dim)))
+    results.append(("Task3 simulate decode out shape (num_seqs,H,D)",
+                    tuple(decode_out.shape) == (num_seqs, num_heads, head_dim)))
+    expected = torch.stack([prefill_out[2], prefill_out[4]])
+    ok = (decode_out.shape == expected.shape
+          and torch.allclose(decode_out, expected, atol=1e-2))
+    results.append(("Task3 decode out == prefill last-token (allclose) "
+                    "— check cache_seqlens/block_table vs cache prefill", ok))
+    return results
+
+
+def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
+    """TODO(student) — Task 3: call the two flash-attention interfaces on toy inputs.
+    fa_varlen/fa_kvcache are passed in (real flash_attn from main(); mocks in tests) —
+    you only need to CALL them correctly. Focus: what args differ between prefill & decode.
+    Returns (prefill_out, decode_out). Mirror attention.py:67-70 (prefill) / 72-74 (decode).
+    """
+    import torch
+    num_heads, num_kv_heads, head_dim = TOY_NUM_HEADS, TOY_NUM_KV_HEADS, TOY_HEAD_DIM
+    scale = head_dim ** -0.5
+    # toy inputs (provided): 2 seqs of lengths [3, 2]
+    q = torch.randn(5, num_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn(5, num_kv_heads, head_dim, device=device, dtype=dtype)
+    v = torch.randn(5, num_kv_heads, head_dim, device=device, dtype=dtype)
+    cu_seqlens_q = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    cu_seqlens_k = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    try:
+        # TODO(student) ①: prefill — flash_attn_varlen_func contract (attention.py:67-70)
+        prefill_out = fa_varlen(q, k, v, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
+                                max_seqlen_q=3, max_seqlen_k=3, softmax_scale=scale, causal=True)
+        # decode cache (provided): paged (num_blocks, block_size, kv_heads, head_dim)
+        q_dec = torch.stack([q[2], q[4]])                                  # last-token q per seq
+        k_cache = torch.zeros(2, 4, num_kv_heads, head_dim, device=device, dtype=dtype)
+        v_cache = torch.zeros_like(k_cache)
+        k_cache[0, :3], k_cache[1, :2] = k[:3], k[3:5]                     # simple slice prefill
+        v_cache[0, :3], v_cache[1, :2] = v[:3], v[3:5]
+        block_table = torch.tensor([[0], [1]], dtype=torch.int32, device=device)
+        cache_seqlens = torch.tensor([3, 2], dtype=torch.int32, device=device)
+        # TODO(student) ②: decode — flash_attn_with_kvcache contract (attention.py:72-74)
+        decode_out = fa_kvcache(q_dec.unsqueeze(1), k_cache, v_cache,
+                                cache_seqlens=cache_seqlens, block_table=block_table,
+                                softmax_scale=scale, causal=True).squeeze(1)
+    except FAContractError:
+        raise
+    except Exception as e:
+        raise FAContractError(
+            f"flash_attn call failed — likely wrong arguments. "
+            f"Mirror attention.py:67-70 (prefill) / 72-74 (decode).\nOriginal: {e}") from e
+    return prefill_out, decode_out
 
 
 def run_checks(max_tokens, fa_results=None, block_size=BLOCK_SIZE):
