@@ -98,7 +98,7 @@ def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
     ① prefill  — mirror attention.py:67-70:
         prefill_out = fa_varlen(q, k, v, cu_seqlens_q=…, cu_seqlens_k=…,
                                 max_seqlen_q=3, max_seqlen_k=3, softmax_scale=scale, causal=True)
-    ② decode cache (paged (2,4,kv_heads,head_dim)); q_dec = stack([q[2], q[4]]):
+    ② decode cache (paged (2,256,kv_heads,head_dim)); q_dec = stack([q[2], q[4]]):
         k_cache[0,:3]=k[:3]; k_cache[1,:2]=k[3:5];  v_cache likewise
         block_table=[[0],[1]]; cache_seqlens=[3,2]
     ② decode   — mirror attention.py:72-74:

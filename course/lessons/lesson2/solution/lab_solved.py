@@ -123,7 +123,7 @@ def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
                                 max_seqlen_q=3, max_seqlen_k=3, softmax_scale=scale, causal=True)
         # decode cache (provided): paged (num_blocks, block_size, kv_heads, head_dim)
         q_dec = torch.stack([q[2], q[4]])                                  # last-token q per seq
-        k_cache = torch.zeros(2, 4, num_kv_heads, head_dim, device=device, dtype=dtype)
+        k_cache = torch.zeros(2, 256, num_kv_heads, head_dim, device=device, dtype=dtype)
         v_cache = torch.zeros_like(k_cache)
         k_cache[0, :3], k_cache[1, :2] = k[:3], k[3:5]                     # simple slice prefill
         v_cache[0, :3], v_cache[1, :2] = v[:3], v[3:5]

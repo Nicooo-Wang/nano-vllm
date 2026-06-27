@@ -145,7 +145,7 @@ def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
                                 max_seqlen_q=3, max_seqlen_k=3, softmax_scale=scale, causal=True)
         # decode cache (provided): paged (num_blocks, block_size, kv_heads, head_dim)
         q_dec = torch.stack([q[2], q[4]])                                  # last-token q per seq
-        k_cache = torch.zeros(2, 4, num_kv_heads, head_dim, device=device, dtype=dtype)
+        k_cache = torch.zeros(2, 256, num_kv_heads, head_dim, device=device, dtype=dtype)
         v_cache = torch.zeros_like(k_cache)
         k_cache[0, :3], k_cache[1, :2] = k[:3], k[3:5]                     # simple slice prefill
         v_cache[0, :3], v_cache[1, :2] = v[:3], v[3:5]
@@ -184,7 +184,7 @@ def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
 | 参数 | 值 | 含义 |
 |------|-----|------|
 | `q_dec.unsqueeze(1)` | `(2, 1, 4, 64)` | **必须 `unsqueeze(1)` 注入 `seq_len=1` 维**！kvcache 接口要求 query 是 `(batch, seqlen, heads, D)`，而 `q_dec` 只是 `(2, 4, 64)`。漏 `unsqueeze` 会 shape 报错（见 §3.4）。 |
-| `k_cache, v_cache` | `(2, 4, 1, 64)` | **paged 缓存**（不传 k/v）——`(num_blocks, block_size, num_kv_heads, head_dim)`。toy 缩小：2 个 block、block_size=4。 |
+| `k_cache, v_cache` | `(2, 256, 1, 64)` | **paged 缓存**（不传 k/v）——`(num_blocks, block_size, num_kv_heads, head_dim)`。2 个 block、`block_size=256`（`flash_attn_with_kvcache` 要求 block size 整除 256，对齐 `config.py:17`）。 |
 | `cache_seqlens` | `[3, 2]` | 每条 seq 在 cache 里的**有效 KV 长度**（seq0 有 3 个、seq1 有 2 个）。 |
 | `block_table` | `[[0], [1]]` | 逻辑 token → 物理 block 映射：seq0 的 token 在 block 0、seq1 的在 block 1。 |
 | `softmax_scale` / `causal` | `1/8` / `True` | 同 prefill。 |
