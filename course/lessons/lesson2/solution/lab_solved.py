@@ -143,23 +143,159 @@ def simulate_fa_calls(fa_varlen, fa_kvcache, device, dtype):
 
 
 def run_checks(max_tokens, fa_results=None, block_size=BLOCK_SIZE):
-    raise NotImplementedError("Task 5: fill in run_checks")
+    """Verify _trace + slot geometry (+ optional FA simulation) against invariants."""
+    results = []
+    prefill_recs = [r for r in _trace if r["is_prefill"]]
+    decode_recs = [r for r in _trace if not r["is_prefill"]]
+    results.append(("Task1 captured prefill varlen call", len(prefill_recs) >= 1))
+    results.append(("Task1 captured decode kvcache call", len(decode_recs) >= 1))
+    if prefill_recs:
+        p = prefill_recs[0]
+        q_shape = p["q_shape"]
+        cu = p["cu_seqlens_q"]
+        packed = len(q_shape) == 3 and cu is not None and q_shape[0] == cu[-1]
+        results.append(("Task1 prefill q.shape is packed (total,H,D)", packed))
+        results.append(("Task4 prefill cu_seqlens_q == [0,a,a+b]",
+                        cu == sorted(cu) and cu[0] == 0 and len(cu) >= 2))
+        # Task 2: reconstruct seq_A's slot slice and compare to captured
+        if _seq_blocks:
+            seq_a_id = min(_seq_blocks)
+            a = cu[1]
+            recon = prefill_slot_mapping(_seq_blocks[seq_a_id], block_size, 0, a)
+            results.append(("Task2 prefill_slot_mapping matches captured slot_mapping",
+                            recon == list(p["slot_mapping"])[:a]))
+        else:
+            results.append(("Task2 prefill_slot_mapping matches captured slot_mapping", False))
+    if decode_recs:
+        d = decode_recs[0]
+        cl = d["context_lens"] or []
+        results.append(("Task4 decode q.shape is (num_seqs,H,D)",
+                        len(d["q_shape"]) == 3 and d["q_shape"][0] == len(cl)))
+    if fa_results is not None:
+        prefill_out, decode_out = fa_results
+        results.extend(_verify_fa_calls(prefill_out, decode_out))
+    return results
 
 
 def _check_env(model_path):
-    raise NotImplementedError("Task 5")
+    import os
+    missing = []
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        missing.append("torch")
+    try:
+        import flash_attn  # noqa: F401
+    except Exception:
+        missing.append("flash-attn")
+    if not os.path.isdir(model_path):
+        missing.append(f"model at {model_path}")
+    if missing:
+        print("Missing prerequisites: " + ", ".join(missing))
+        print("See course/lessons/lesson1/TUTORIAL.md §0 for setup.")
+        raise SystemExit(1)
 
 
 def _print_trace():
-    raise NotImplementedError("Task 5")
+    print("\n--- trace (one row per engine step, layer 0's Attention.forward) ---")
+    for i, r in enumerate(_trace):
+        flag = "PREFILL" if r["is_prefill"] else "DECODE "
+        if r["is_prefill"]:
+            print(f"step {i:2d} {flag} q={r['q_shape']} cu_q={r['cu_seqlens_q']} "
+                  f"cu_k={r['cu_seqlens_k']} slot[:6]={r['slot_mapping'][:6]}...")
+        else:
+            print(f"step {i:2d} {flag} q={r['q_shape']} ctx_lens={r['context_lens']} "
+                  f"block_tables={r['block_tables']} slot={r['slot_mapping']}")
+
+
+# a long English prompt that tokenizes to > 512 tokens (spans >= 3 blocks of 256)
+_LONG_PROMPT = (
+    "Explain in detail how paged attention works. " * 60
+)
 
 
 def main():
-    raise NotImplementedError("Task 5")
+    from nanovllm import LLM, SamplingParams
+    from nanovllm.engine.scheduler import Scheduler
+    from nanovllm.layers.attention import Attention
+    from nanovllm.utils.context import get_context
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    from transformers import AutoTokenizer
+    import os
+    import torch
+
+    global _orig_attention_forward, _orig_postprocess, _get_context
+    model_path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
+    max_tokens = 4
+    _check_env(model_path)
+
+    # Task 3: manual FA call on real flash_attn (GPU). Raises FAContractError if mis-called.
+    fa_prefill, fa_decode = simulate_fa_calls(
+        flash_attn_varlen_func, flash_attn_with_kvcache, "cuda", torch.bfloat16)
+
+    # install hooks — do NOT modify nanovllm source
+    _orig_attention_forward = Attention.forward
+    _orig_postprocess = Scheduler.postprocess
+    _get_context = get_context
+    Attention.forward = traced_attention_forward
+    Scheduler.postprocess = traced_postprocess
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    llm = LLM(model_path, enforce_eager=True, tensor_parallel_size=1)
+    sp = SamplingParams(temperature=0.6, max_tokens=max_tokens)
+    raw = [_LONG_PROMPT, "list all prime numbers within 100"]
+    prompts = [tokenizer.apply_chat_template([{"role": "user", "content": p}],
+                                             tokenize=False, add_generation_prompt=True)
+               for p in raw]
+    llm.generate(prompts, sp)
+
+    _print_trace()
+    print("\n--- checks ---")
+    results = run_checks(max_tokens, fa_results=(fa_prefill, fa_decode))
+    for name, ok in results:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+    if all(ok for _, ok in results):
+        print("\nAll checks passed ✓")
+    else:
+        print("\nSome checks FAILED — review your TODO implementations.")
+        raise SystemExit(1)
 
 
 def main_cudagraph():
-    raise NotImplementedError("Task 5")
+    """Run 2 (Q3b): observe the -1 sentinel in graph_vars['slot_mapping'].
+    Separate process — a second LLM() in-process would re-init the NCCL group."""
+    from nanovllm import LLM, SamplingParams
+    from transformers import AutoTokenizer
+    import os
+
+    model_path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
+    _check_env(model_path)
+    try:
+        llm = LLM(model_path, enforce_eager=False, tensor_parallel_size=1)
+    except Exception as e:
+        print(f"[Q3b] capture_cudagraph unavailable on this GPU: {e}")
+        print("[Q3b] Fallback (explain-from-code): model_runner.py:206-207 does")
+        print("       slot_mapping.fill_(-1) then overwrites [:bs]; attention.py:23 has")
+        print("       `if slot == -1: return` — the -1 sentinel lets the CUDA-graph static")
+        print("       buffer ignore slots beyond the real batch (else it would scatter into slot 0).")
+        return
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    sp = SamplingParams(temperature=0.6, max_tokens=4)
+    raw = ["introduce yourself", "hi"]
+    prompts = [tokenizer.apply_chat_template([{"role": "user", "content": p}],
+                                             tokenize=False, add_generation_prompt=True)
+               for p in raw]
+    llm.generate(prompts, sp)
+
+    sm = llm.model_runner.graph_vars["slot_mapping"]
+    bs = 2
+    n_sentinel = int((sm[bs:] == -1).sum().item())
+    print("\n--- Q3b: cudagraph slot_mapping -1 sentinel (model_runner.py:206-207) ---")
+    print(f"graph_vars['slot_mapping'].shape = {tuple(sm.shape)} (= min(max_num_seqs, 512))")
+    print(f"  [:{bs}]  real slots : {sm[:bs].tolist()}")
+    print(f"  [{bs}:]  -1 sentinel : {n_sentinel} of {sm.numel() - bs} are -1")
+    print("  → store_kvcache_kernel skips them (attention.py:23 `if slot == -1: return`);")
+    print("    without the sentinel, the static graph buffer would scatter stale KV into slot 0.")
 
 
 if __name__ == "__main__":

@@ -155,6 +155,39 @@ def test_verify_fa_calls_rejects_bad_prefill_shape():
     assert any("prefill out shape" in n for n in failed)
 
 
+def _build_trace_scenario():
+    """Synthetic _trace + _seq_blocks for run_checks (block_size=4 for tiny numbers)."""
+    lab._trace = [
+        {"is_prefill": True,
+         "q_shape": (9, 4, 64), "k_shape": (9, 1, 64), "v_shape": (9, 1, 64),
+         "cu_seqlens_q": [0, 6, 9], "cu_seqlens_k": [0, 6, 9],
+         "max_seqlen_q": 6, "max_seqlen_k": 6, "context_lens": None,
+         "block_tables": None,
+         "slot_mapping": [8, 9, 10, 11, 20, 21,   # seq_A (block_table [2,5]): 4 + 2
+                          30, 31, 32]},            # seq_B (block 7): 3
+        {"is_prefill": False,
+         "q_shape": (2, 4, 64), "k_shape": (2, 1, 64), "v_shape": (2, 1, 64),
+         "cu_seqlens_q": None, "cu_seqlens_k": None,
+         "max_seqlen_q": 0, "max_seqlen_k": 0, "context_lens": [7, 4],
+         "block_tables": (2, 2), "slot_mapping": [99, 100]},
+    ]
+    lab._seq_blocks = {10: [2, 5], 11: [7]}   # seq_A (id 10) = long prompt; seq_B (id 11)
+
+
+def test_run_checks_all_pass_on_valid_scenario():
+    _build_trace_scenario()
+    failed = [n for n, ok in lab.run_checks(max_tokens=4, fa_results=None, block_size=4)
+              if not ok and "Task3" not in n]
+    assert not failed, f"unexpected failures: {failed}"
+
+
+def test_run_checks_catches_wrong_slot_geometry():
+    _build_trace_scenario()
+    lab._trace[0]["slot_mapping"][0] = 999   # corrupt seq_A's first slot
+    results = dict(lab.run_checks(max_tokens=4, fa_results=None, block_size=4))
+    assert results["Task2 prefill_slot_mapping matches captured slot_mapping"] is False
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":
