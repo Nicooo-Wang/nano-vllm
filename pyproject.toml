@@ -12,12 +12,29 @@ readme = "README.md"
 description = "a lightweight vLLM implementation built from scratch"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-    "torch>=2.4.0",
+    # Pin to a CUDA 12 build: the host NVIDIA driver supports up to CUDA 12.8,
+    # and prebuilt flash-attn wheels (2.8.x) only go up to torch 2.8. Newer torch
+    # (2.9+) breaks the flash_attn_2_cuda ABI (c10_cuda_check_implementation
+    # changed int -> unsigned int), so do not let uv upgrade torch past 2.8.
+    "torch==2.8.0",
     "triton>=3.0.0",
     "transformers>=4.51.0",
-    "flash-attn",
+    "flash-attn==2.8.3.post1",
     "xxhash",
 ]
+
+[tool.uv.sources]
+# Force torch to the CUDA 12.8 wheel index (PyPI's default torch is a CUDA 13 build).
+torch = { index = "pytorch-cu128" }
+# Use the official prebuilt flash-attn wheel built for torch 2.8 + cu12 + cxx11abi
+# (PyTorch 2.7+ uses the CXX11 ABI). Avoids a slow from-source build and guarantees
+# ABI match with torch 2.8.0.
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1+cu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [project.urls]
 Homepage="https://github.com/GeeeekExplorer/nano-vllm"
